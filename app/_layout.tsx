@@ -1,56 +1,68 @@
 import { useFonts } from 'expo-font';
-import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
+import { Stack, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
+import { ActivityIndicator, View } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import 'react-native-reanimated';
-
+import { useFinancialStore } from '@/src/store/useFinancialStore';
+import { themeColors } from '@/src/theme/colors';
 import { useColorScheme } from '@/components/useColorScheme';
 
-export {
-  // Catch any errors thrown by the Layout component.
-  ErrorBoundary,
-} from 'expo-router';
+export { ErrorBoundary } from 'expo-router';
 
-export const unstable_settings = {
-  // Ensure that reloading on `/modal` keeps a back button present.
-  initialRouteName: '(tabs)',
-};
-
-// Prevent the splash screen from auto-hiding before asset loading is complete.
 SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
   const [loaded, error] = useFonts({
     SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
   });
+  const init = useFinancialStore((s) => s.init);
+  const initialized = useFinancialStore((s) => s.initialized);
+  const currentUserEmail = useFinancialStore((s) => s.currentUserEmail);
+  const segments = useSegments();
+  const router = useRouter();
+  const colorScheme = useColorScheme();
+  const colors = themeColors(colorScheme === 'dark');
 
-  // Expo Router uses Error Boundaries to catch errors in the navigation tree.
   useEffect(() => {
     if (error) throw error;
   }, [error]);
 
   useEffect(() => {
-    if (loaded) {
+    init();
+  }, [init]);
+
+  useEffect(() => {
+    if (loaded && initialized) {
       SplashScreen.hideAsync();
     }
-  }, [loaded]);
+  }, [loaded, initialized]);
 
-  if (!loaded) {
-    return null;
+  useEffect(() => {
+    if (!initialized) return;
+    const inLogin = segments[0] === 'login';
+    if (!currentUserEmail && !inLogin) {
+      router.replace('/login');
+    } else if (currentUserEmail && inLogin) {
+      router.replace('/(tabs)');
+    }
+  }, [currentUserEmail, initialized, segments, router]);
+
+  if (!loaded || !initialized) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.background }}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
   }
 
-  return <RootLayoutNav />;
-}
-
-function RootLayoutNav() {
-  const colorScheme = useColorScheme();
-
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
+    <SafeAreaProvider>
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="login" />
+        <Stack.Screen name="(tabs)" />
       </Stack>
-    </ThemeProvider>
+    </SafeAreaProvider>
   );
 }

@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "855990324101",
+    "project_id": "expendituretrackingagent",
+    "storage_bucket": "expendituretrackingagent.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:855990324101:android:169e7b1f4bd82f24ad92ec",
+        "android_client_info": {
+          "package_name": "com.aistudio.futurefund.qybnza"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "855990324101-mq9e5pgc7ub1r680i1l82f3j9t767ig1.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA5TbejBYBG3aUHxdWaOCD1ddlFXPqYXm8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "855990324101-mq9e5pgc7ub1r680i1l82f3j9t767ig1.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
