@@ -88,3 +88,8 @@ futurefund-expo/
 ## Original Android App
 
 The Kotlin source remains in the parent `ExpenseAI/` directory. This Expo app is a feature-parity rebuild for iOS, Android, and web from a single codebase.
+
+### EXPO Account Login - 
+
+Id - ```pankaj89```
+Pa - ```Pankaj#2026```

@@ -48,6 +48,17 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {
+        "headers": {
+          "Cross-Origin-Embedder-Policy": "credentialless",
+          "Cross-Origin-Opener-Policy": "same-origin"
+        }
+      },
+      "eas": {
+        "projectId": "fcb03d09-38d3-4cc7-bb0f-1cf09392395a"
+      }
     }
   }
 }
