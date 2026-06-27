@@ -8,6 +8,7 @@ import {
   signInWithEmail,
   signOutUser,
   subscribeToAuthChanges,
+  updateAuthDisplayName,
 } from '@/src/services/auth';
 import { isFirebaseConfigured } from '@/src/config/firebase';
 import { getFinancialAdvice, suggestCategory as geminiSuggestCategory } from '@/src/services/gemini';
@@ -35,16 +36,27 @@ const PREFS = {
 
 let authUnsubscribe: (() => void) | null = null;
 
-async function ensureUserProfile(email: string, displayName: string, monthlyIncome?: number): Promise<void> {
+async function syncUserProfile(
+  email: string,
+  authDisplayName?: string | null,
+  monthlyIncome?: number
+): Promise<void> {
   const existing = await repo.getUserProfile(email);
+  const firebaseName = authDisplayName?.trim();
+
   if (!existing) {
     await repo.saveUserProfile({
       email,
-      displayName,
+      displayName: firebaseName || email.split('@')[0],
       monthlyIncome: monthlyIncome ?? 5000,
       baseSavingsRatePercent: 20,
       alertPreference: true,
     });
+    return;
+  }
+
+  if (firebaseName && existing.displayName !== firebaseName) {
+    await repo.saveUserProfile({ ...existing, displayName: firebaseName });
   }
 }
 
@@ -181,8 +193,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       let resolved = false;
       authUnsubscribe = subscribeToAuthChanges(async (user) => {
         if (user?.email) {
-          const displayName = user.displayName?.trim() || user.email.split('@')[0];
-          await ensureUserProfile(user.email, displayName);
+          await syncUserProfile(user.email, user.displayName);
           set({ currentUserEmail: user.email });
           await get().refreshUserData();
         } else {
@@ -230,7 +241,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   registerAccount: async (email, password, displayName, monthlyIncome) => {
     try {
       await registerWithEmail(email, password, displayName);
-      await ensureUserProfile(email, displayName, monthlyIncome);
+      await syncUserProfile(email, displayName, monthlyIncome);
       await repo.addSystemLog(email, 'Account Created', `Registered as ${displayName}.`, 'SYSTEM');
       return null;
     } catch (error) {
@@ -240,7 +251,8 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
 
   signInAccount: async (email, password) => {
     try {
-      await signInWithEmail(email, password);
+      const user = await signInWithEmail(email, password);
+      await syncUserProfile(user.email!, user.displayName);
       const profile = await repo.getUserProfile(email);
       if (profile) {
         await repo.addSystemLog(email, 'Auth Success', `Signed in as ${profile.displayName}.`, 'SYSTEM');
@@ -263,6 +275,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     const email = get().currentUserEmail;
     if (!email) return;
     await repo.saveUserProfile({ email, displayName, monthlyIncome: income, baseSavingsRatePercent: savingsRate, alertPreference: alertEnabled, photoUrl });
+    await updateAuthDisplayName(displayName);
     await repo.addSystemLog(email, 'Profile Updated', 'Customized profile adjustments successfully stored.', 'SYSTEM');
     await get().refreshUserData();
   },

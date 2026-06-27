@@ -93,3 +93,23 @@ The Kotlin source remains in the parent `ExpenseAI/` directory. This Expo app is
 
 Id - ```pankaj89```
 Pa - ```Pankaj#2026```
+
+
+### For Building Production Grade application
+
+Run the command to build in Expo Website - ```eas build -p --profile production```
+
+For that you should be logged into EAS. Type command - ```eas login```
+Then provide login credentials as above provided.
+
+If EAS CLI is not installed, install it by - ```npm install -g eas-cli```
+
+**Note**: Always keep update your package.lock.json with package.json. ```npm ci``` command is used in the build process. So any mismatch will trigger error. In that remove all ``node_modules`` with ``package-lock.json``. For that command in Windows is: 
+
+```bash
+Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
+Remove-Item package-lock.json -ErrorAction SilentlyContinue
+npm install 
+```
+
+Then commit and push the code in github and then again run the eas build process : ```eas build -p android --profile production```

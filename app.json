@@ -19,7 +19,7 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.pankaj89.futurefund",
-      "softwareKeyboardLayoutMode": "resize"
+      "softwareKeyboardLayoutMode": "adjustResize"
     },
     "web": {
       "bundler": "metro",

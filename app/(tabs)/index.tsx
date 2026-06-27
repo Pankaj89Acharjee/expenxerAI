@@ -95,7 +95,7 @@ export default function DashboardScreen() {
     <ScrollView style={[styles.container, { backgroundColor: colors.background }]} contentContainerStyle={styles.content}>
       <View style={styles.header}>
         <View>
-          <Text style={[styles.archLabel, { color: colors.primary }]}>FUTUREFUND ARCHI</Text>
+          <Text style={[styles.archLabel, { color: colors.primary }]}>PERSONAL EXPENXER</Text>
           <Text style={[styles.greeting, { color: colors.text }]}>{greeting()}, {profile?.displayName ?? 'there'}</Text>
         </View>
         <View style={[styles.avatar, { backgroundColor: colors.primary + '20' }]}>

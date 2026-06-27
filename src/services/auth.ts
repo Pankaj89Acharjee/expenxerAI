@@ -33,6 +33,13 @@ export async function signOutUser(): Promise<void> {
   await signOut(getFirebaseAuth());
 }
 
+export async function updateAuthDisplayName(displayName: string): Promise<void> {
+  const user = getFirebaseAuth().currentUser;
+  if (user && displayName.trim()) {
+    await updateProfile(user, { displayName: displayName.trim() });
+  }
+}
+
 export function mapFirebaseAuthError(error: unknown): string {
   const code = (error as { code?: string })?.code ?? '';
   switch (code) {
