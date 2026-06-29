@@ -10,6 +10,8 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { MaterialIcons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { useColorScheme } from '@/components/useColorScheme';
 import { useFinancialStore } from '@/src/store/useFinancialStore';
@@ -20,6 +22,52 @@ import type { SavingGoal } from '@/src/types/models';
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
+const TREND_BAR_GRADIENT = ['#6EE7B7', '#34D399', '#059669', '#047857'] as const;
+
+const TREND_CARD_GRADIENT = {
+  dark: ['#022C22', '#064E3B', '#047857'] as const,
+  light: ['#195243', '#047857', '#03291d'] as const,
+};
+
+const CATEGORY_CARD_GRADIENT = {
+  dark: ['#1E1B4B', '#312E81', '#5B21B6'] as const,
+  light: ['#161532', '#4C1D95', '#1c0441'] as const,
+};
+
+const AUTO_PDF_GRADIENT = ['#1E3A8A', '#2563EB', '#3B82F6'] as const;
+const AUTO_EXPORT_GRADIENT = ['#064E3B', '#047857', '#059669'] as const;
+const AUTO_GMAIL_GRADIENT = ['#4C1D95', '#6D28D9', '#7C3AED'] as const;
+const AUTO_SHEET_GRADIENT = ['#0F766E', '#0D9488', '#14B8A6'] as const;
+
+const NAV_EXPENSES_GRADIENT = ['#9F1239', '#BE123C', '#E11D48'] as const;
+const NAV_PLANNER_GRADIENT = ['#3730A3', '#4F46E5', '#6366F1'] as const;
+
+const CATEGORY_GRADIENTS: Record<string, readonly [string, string]> = {
+  Utilities: ['#60A5FA', '#2563EB'],
+  Transport: ['#FB7185', '#E11D48'],
+  Food: ['#4ADE80', '#16A34A'],
+  Housing: ['#A78BFA', '#7C3AED'],
+  Shopping: ['#FBBF24', '#D97706'],
+  Health: ['#2DD4BF', '#0D9488'],
+  Entertainment: ['#F472B6', '#DB2777'],
+  Groceries: ['#86EFAC', '#15803D'],
+  Savings: ['#34D399', '#047857'],
+  Borrowing: ['#FDBA74', '#EA580C'],
+  'Credit-card': ['#C084FC', '#9333EA'],
+};
+
+const FALLBACK_GRADIENTS: readonly [string, string][] = [
+  ['#60A5FA', '#2563EB'],
+  ['#FB7185', '#E11D48'],
+  ['#4ADE80', '#16A34A'],
+  ['#A78BFA', '#7C3AED'],
+  ['#FBBF24', '#D97706'],
+];
+
+function categoryGradient(name: string, index: number): readonly [string, string] {
+  return CATEGORY_GRADIENTS[name] ?? FALLBACK_GRADIENTS[index % FALLBACK_GRADIENTS.length];
+}
+
 export default function DashboardScreen() {
   const router = useRouter();
   const colorScheme = useColorScheme();
@@ -29,6 +77,7 @@ export default function DashboardScreen() {
   const profile = useFinancialStore((s) => s.userProfile);
   const expenses = useFinancialStore((s) => s.expenses);
   const liabilities = useFinancialStore((s) => s.liabilities);
+  const subscriptions = useFinancialStore((s) => s.subscriptions);
   const savingGoals = useFinancialStore((s) => s.savingGoals);
   const logs = useFinancialStore((s) => s.logs);
   const aiReportAdvice = useFinancialStore((s) => s.aiReportAdvice);
@@ -79,8 +128,39 @@ export default function DashboardScreen() {
     return Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, 5);
   }, [expenses]);
 
-  const maxCategory = categoryTotals[0]?.[1] ?? 1;
+  const categoryTotalSum = useMemo(
+    () => categoryTotals.reduce((s, [, amt]) => s + amt, 0),
+    [categoryTotals]
+  );
+
+  const peakTrendDay = useMemo(() => {
+    if (!trendData.length) return null;
+    return trendData.reduce((best, d) => (d.total > best.total ? d : best), trendData[0]);
+  }, [trendData]);
+
   const mostExpensive = useMemo(() => [...expenses].sort((a, b) => b.amount - a.amount)[0], [expenses]);
+
+  const pendingBorrowing = useMemo(
+    () =>
+      expenses
+        .filter((e) => e.category === 'Borrowing' && !e.isSettled)
+        .reduce((s, e) => s + e.amount, 0),
+    [expenses]
+  );
+
+  const pendingBorrowingCount = useMemo(
+    () => expenses.filter((e) => e.category === 'Borrowing' && !e.isSettled).length,
+    [expenses]
+  );
+
+  const plannerTotal = useMemo(() => {
+    const liabilitySum = liabilities.filter((l) => !l.isPaid).reduce((s, l) => s + l.amount, 0);
+    const subSum = subscriptions.reduce((s, sub) => s + sub.cost, 0);
+    return liabilitySum + subSum;
+  }, [liabilities, subscriptions]);
+
+  const expensesDisplay = totalExpenses > 0 ? formatCurrency(totalExpenses) : '-';
+  const plannerDisplay = plannerTotal > 0 ? formatCurrency(plannerTotal) : '-';
 
   const handleContribute = async () => {
     if (!contribGoal) return;
@@ -114,6 +194,36 @@ export default function DashboardScreen() {
         <Text style={styles.heroRemaining}>{formatCurrency(remainingBudget)} remaining this cycle</Text>
       </View>
 
+      {pendingBorrowing > 0 && (
+        <Pressable
+          onPress={() => router.push({ pathname: '/(tabs)/expenses', params: { category: 'Borrowing' } })}
+          style={({ pressed }) => [styles.borrowingCardWrap, pressed && { opacity: 0.92, transform: [{ scale: 0.99 }] }]}
+        >
+          <LinearGradient
+            colors={isDark ? ['#7C2D12', '#B45309', '#D97706'] : ['#FEF3C7', '#FDE68A', '#F59E0B']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.borrowingCard}
+          >
+            <View style={styles.borrowingIconWrap}>
+              <MaterialIcons name="handshake" size={28} color={isDark ? '#FEF3C7' : '#92400E'} />
+            </View>
+            <View style={styles.borrowingCopy}>
+              <Text style={[styles.borrowingLabel, { color: isDark ? '#E2BC27' : '#843505' }]}>
+                PENDING BORROWING
+              </Text>
+              <Text style={[styles.borrowingAmount, { color: isDark ? '#FFFBEB' : '#78350F' }]}>
+                {formatCurrency(pendingBorrowing)}
+              </Text>
+              <Text style={[styles.borrowingSub, { color: isDark ? '#FCD34D' : '#A16207' }]}>
+                {pendingBorrowingCount} unsettled item{pendingBorrowingCount === 1 ? '' : 's'} · Tap to settle
+              </Text>
+            </View>
+            <MaterialIcons name="chevron-right" size={28} color={isDark ? '#FDE68A' : '#92400E'} />
+          </LinearGradient>
+        </Pressable>
+      )}
+
       <View style={styles.bentoRow}>
         <View style={[styles.bentoCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <Text style={[styles.bentoLabel, { color: colors.textMuted }]}>✨ AI Coach</Text>
@@ -135,42 +245,112 @@ export default function DashboardScreen() {
         </View>
       </View>
 
-      {/* Trend Chart */}
-      <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-        <Text style={[styles.cardTitle, { color: colors.text }]}>7-Day Expense Trend</Text>
-        <View style={styles.chartRow}>
-          {trendData.map((d) => (
-            <View key={d.day} style={styles.barCol}>
-              <View style={[styles.barTrack, { backgroundColor: colors.surfaceVariant }]}>
-                <View style={[styles.barFill, { height: `${(d.total / maxTrend) * 100}%`, backgroundColor: Colors.chartBlue }]} />
-              </View>
-              <Text style={[styles.barLabel, { color: colors.textMuted }]}>{d.day}</Text>
-            </View>
-          ))}
-        </View>
-      </View>
-
-      {/* Category Chart */}
-      <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-        <Text style={[styles.cardTitle, { color: colors.text }]}>Top Categories</Text>
-        {categoryTotals.map(([cat, amt]) => (
-          <View key={cat} style={styles.catRow}>
-            <Text style={[styles.catName, { color: colors.text }]}>{cat}</Text>
-            <View style={[styles.catTrack, { backgroundColor: colors.surfaceVariant }]}>
-              <View style={[styles.catFill, { width: `${(amt / maxCategory) * 100}%`, backgroundColor: colors.primary }]} />
-            </View>
-            <Text style={[styles.catAmt, { color: colors.textMuted }]}>{formatCurrency(amt)}</Text>
+      {/* Expense Trends */}
+      <View style={styles.gradientCardWrap}>
+        <LinearGradient
+          colors={[...(isDark ? TREND_CARD_GRADIENT.dark : TREND_CARD_GRADIENT.light)]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.gradientCard}
+        >
+          <Text style={[styles.sectionTitle, styles.gradientCardTitle, { color: '#A7F3D0' }]}>
+            Expense Trends (Last 7 Days)
+          </Text>
+          <View style={styles.chartRow}>
+            {trendData.map((d) => {
+              const barPct = maxTrend > 0 ? (d.total / maxTrend) * 100 : 0;
+              const showLabel = peakTrendDay?.day === d.day && d.total > 0;
+              return (
+                <View key={d.day} style={styles.barCol}>
+                  {showLabel ? (
+                    <Text style={[styles.barValueLabel, { color: '#D1FAE5' }]}>
+                      ₹{Math.round(d.total)}
+                    </Text>
+                  ) : (
+                    <View style={styles.barValueSpacer} />
+                  )}
+                  <View style={[styles.barTrack, { backgroundColor: 'rgba(0,0,0,0.28)' }]}>
+                    {d.total > 0 ? (
+                      <LinearGradient
+                        colors={[...TREND_BAR_GRADIENT]}
+                        start={{ x: 0.5, y: 0 }}
+                        end={{ x: 0.5, y: 1 }}
+                        style={[styles.barFill, { height: `${Math.max(barPct, 10)}%` }]}
+                      />
+                    ) : null}
+                  </View>
+                  <Text style={[styles.barLabel, { color: 'rgba(255,255,255,0.72)' }]}>{d.day}</Text>
+                </View>
+              );
+            })}
           </View>
-        ))}
+        </LinearGradient>
       </View>
 
-      {mostExpensive && (
-        <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <Text style={[styles.cardTitle, { color: colors.text }]}>Most Expensive Item</Text>
-          <Text style={[styles.expensiveTitle, { color: colors.text }]}>{mostExpensive.title}</Text>
-          <Text style={{ color: Colors.chartRed, fontWeight: '800', fontSize: 22 }}>{formatCurrency(mostExpensive.amount)}</Text>
+      {/* Category Breakdown */}
+      <View style={styles.gradientCardWrap}>
+        <LinearGradient
+          colors={[...(isDark ? CATEGORY_CARD_GRADIENT.dark : CATEGORY_CARD_GRADIENT.light)]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.gradientCard}
+        >
+          <Text style={[styles.sectionTitle, styles.gradientCardTitle, { color: '#C4B5FD' }]}>
+            Category Breakdown
+          </Text>
+          {categoryTotals.map(([cat, amt], index) => {
+            const gradient = categoryGradient(cat, index);
+            const pct = categoryTotalSum > 0 ? Math.round((amt / categoryTotalSum) * 100) : 0;
+            const barWidth = categoryTotalSum > 0 ? (amt / categoryTotalSum) * 100 : 0;
+            return (
+              <View key={cat} style={styles.catBreakdownItem}>
+                <View style={styles.catBreakdownHeader}>
+                  <View style={styles.catBreakdownLeft}>
+                    <View style={[styles.catDot, { backgroundColor: gradient[0] }]} />
+                    <Text style={[styles.catName, { color: '#F8FAFC' }]}>{cat}</Text>
+                  </View>
+                  <Text style={[styles.catAmt, { color: '#E2E8F0' }]}>
+                    {formatCurrency(amt)} ({pct}%)
+                  </Text>
+                </View>
+                <View style={[styles.catTrack, { backgroundColor: 'rgba(0,0,0,0.28)' }]}>
+                  <LinearGradient
+                    colors={[gradient[0], gradient[1]]}
+                    start={{ x: 0, y: 0.5 }}
+                    end={{ x: 1, y: 0.5 }}
+                    style={[styles.catFill, { width: `${barWidth}%` }]}
+                  />
+                </View>
+              </View>
+            );
+          })}
+          {categoryTotals.length === 0 ? (
+            <Text style={{ color: 'rgba(255,255,255,0.65)', fontSize: 13 }}>No category data yet.</Text>
+          ) : null}
+        </LinearGradient>
+      </View>
+
+      {mostExpensive ? (
+        <View style={[styles.expensiveCard, { backgroundColor: isDark ? '#2A1215' : '#FEF2F2', borderColor: isDark ? '#4C1D24' : '#FECACA' }]}>
+          <View style={styles.expensiveLeft}>
+            <View style={[styles.expensiveIconCircle, { backgroundColor: isDark ? '#4C1D24' : '#FEE2E2' }]}>
+              <MaterialIcons name="trending-up" size={24} color="#FB7185" />
+            </View>
+            <View style={styles.expensiveCopy}>
+              <Text style={[styles.expensiveLabel, { color: isDark ? '#FDA4AF' : '#BE123C' }]}>
+                HIGHEST SINGLE EXPENDITURE
+              </Text>
+              <Text style={[styles.expensiveTitle, { color: colors.text }]} numberOfLines={1}>
+                {mostExpensive.title}
+              </Text>
+              <Text style={[styles.expensiveCategory, { color: colors.textMuted }]}>
+                Category: {mostExpensive.category}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.expensiveAmount}>{formatCurrency(mostExpensive.amount)}</Text>
         </View>
-      )}
+      ) : null}
 
       {/* Savings Goals */}
       {savingGoals.length > 0 && (
@@ -189,34 +369,88 @@ export default function DashboardScreen() {
         </View>
       )}
 
-      {/* Automation */}
-      <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-        <Text style={[styles.cardTitle, { color: colors.text }]}>Automation & Export</Text>
-        <View style={styles.autoRow}>
-          <Pressable style={[styles.autoBtn, { backgroundColor: colors.emeraldSoft }]} onPress={() => exportPdfReport(profile, expenses, liabilities, savingGoals, aiReportAdvice)}>
-            <Text style={{ color: colors.emeraldText, fontWeight: '700' }}>Daily PDF Report</Text>
+      {/* Automation and Export */}
+      <View>
+        <Text style={[styles.sectionHeading, { color: colors.text }]}>Automation & Export</Text>
+        <View style={styles.actionRow}>
+          <Pressable
+            style={({ pressed }) => [styles.actionCardWrap, pressed && styles.actionCardPressed]}
+            onPress={() => exportPdfReport(profile, expenses, liabilities, savingGoals, aiReportAdvice)}
+          >
+            <LinearGradient colors={AUTO_PDF_GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.actionCard}>
+              <View style={styles.actionIconCircle}>
+                <MaterialIcons name="picture-as-pdf" size={20} color="#EFF6FF" />
+              </View>
+              <Text style={styles.actionCardLabel} numberOfLines={2}>Daily PDF</Text>
+            </LinearGradient>
           </Pressable>
-          <Pressable style={[styles.autoBtn, { backgroundColor: colors.emeraldSoft }]} onPress={() => setShowExport(true)}>
-            <Text style={{ color: colors.emeraldText, fontWeight: '700' }}>Export / Sync</Text>
+          <Pressable
+            style={({ pressed }) => [styles.actionCardWrap, pressed && styles.actionCardPressed]}
+            onPress={() => setShowExport(true)}
+          >
+            <LinearGradient colors={AUTO_EXPORT_GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.actionCard}>
+              <View style={styles.actionIconCircle}>
+                <MaterialIcons name="cloud-upload" size={20} color="#D1FAE5" />
+              </View>
+              <Text style={styles.actionCardLabel} numberOfLines={2}>Export / Sync</Text>
+            </LinearGradient>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.actionCardWrap, pressed && styles.actionCardPressed]}
+            onPress={() => setShowSettings(true)}
+          >
+            <LinearGradient colors={AUTO_GMAIL_GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.actionCard}>
+              <View style={styles.actionIconCircle}>
+                <MaterialIcons name="mail-outline" size={20} color="#EDE9FE" />
+              </View>
+              <Text style={styles.actionCardLabel} numberOfLines={2}>Gmail & Sync</Text>
+            </LinearGradient>
           </Pressable>
         </View>
-        <Pressable style={[styles.autoBtn, { backgroundColor: colors.surfaceVariant, marginTop: 8 }]} onPress={() => setShowSettings(true)}>
-          <Text style={{ color: colors.text, fontWeight: '600' }}>Gmail & Sync Settings</Text>
+        <Pressable
+          style={({ pressed }) => [styles.sheetCardWrap, pressed && styles.actionCardPressed, !googleSheetsSyncUrl && { opacity: 0.72 }]}
+          onPress={() => {
+            if (googleSheetsSyncUrl) Linking.openURL(googleSheetsSyncUrl);
+          }}
+          disabled={!googleSheetsSyncUrl}
+        >
+          <LinearGradient colors={AUTO_SHEET_GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.sheetCard}>
+            <View style={styles.sheetCardLeft}>
+              <View style={styles.actionIconCircle}>
+                <MaterialIcons name="table-chart" size={20} color="#CCFBF1" />
+              </View>
+              <Text style={styles.sheetCardLabel}>Open synced sheet</Text>
+            </View>
+            <MaterialIcons name="open-in-new" size={18} color="#CCFBF1" />
+          </LinearGradient>
         </Pressable>
-        {googleSheetsSyncUrl ? (
-          <Pressable onPress={() => Linking.openURL(googleSheetsSyncUrl)}>
-            <Text style={{ color: colors.primary, marginTop: 8, fontSize: 12 }}>Open synced sheet →</Text>
-          </Pressable>
-        ) : null}
       </View>
 
-      {/* Quick Nav */}
-      <View style={styles.autoRow}>
-        <Pressable style={[styles.navBtn, { borderColor: colors.border }]} onPress={() => router.push('/(tabs)/expenses')}>
-          <Text style={{ color: colors.primary, fontWeight: '700' }}>View Expenses →</Text>
+      {/* Quick Nav for viewing Expense and Planner */}
+      <View style={styles.actionRow}>
+        <Pressable
+          style={({ pressed }) => [styles.navCardWrap, pressed && styles.actionCardPressed]}
+          onPress={() => router.push('/(tabs)/expenses')}
+        >
+          <LinearGradient colors={NAV_EXPENSES_GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.navCard}>
+            <View style={styles.actionIconCircle}>
+              <MaterialIcons name="receipt-long" size={20} color="#FFE4E6" />
+            </View>
+            <Text style={styles.navCardLabel} numberOfLines={1}>View Expenses</Text>
+            <Text style={styles.navCardValue} numberOfLines={1}>{expensesDisplay}</Text>
+          </LinearGradient>
         </Pressable>
-        <Pressable style={[styles.navBtn, { borderColor: colors.border }]} onPress={() => router.push('/(tabs)/planner')}>
-          <Text style={{ color: colors.primary, fontWeight: '700' }}>Planner →</Text>
+        <Pressable
+          style={({ pressed }) => [styles.navCardWrap, pressed && styles.actionCardPressed]}
+          onPress={() => router.push('/(tabs)/planner')}
+        >
+          <LinearGradient colors={NAV_PLANNER_GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.navCard}>
+            <View style={styles.actionIconCircle}>
+              <MaterialIcons name="event-note" size={20} color="#E0E7FF" />
+            </View>
+            <Text style={styles.navCardLabel} numberOfLines={1}>Planner</Text>
+            <Text style={styles.navCardValue} numberOfLines={1}>{plannerDisplay}</Text>
+          </LinearGradient>
         </Pressable>
       </View>
 
@@ -297,10 +531,30 @@ const styles = StyleSheet.create({
   heroCard: { borderRadius: 20, padding: 20 },
   heroLabel: { color: '#94A3B8', fontSize: 10, fontWeight: '800', letterSpacing: 1 },
   heroAmount: { color: '#fff', fontSize: 28, fontWeight: '800', marginTop: 4 },
-  heroSub: { color: '#94A3B8', fontSize: 13, marginTop: 4 },
+  heroSub: { color: '#94A3B8', fontSize: 11, marginTop: 4 },
   progressTrack: { height: 8, backgroundColor: '#334155', borderRadius: 4, marginTop: 12, overflow: 'hidden' },
   progressFill: { height: '100%', borderRadius: 4 },
   heroRemaining: { color: Colors.accentGreen, fontSize: 13, fontWeight: '600', marginTop: 8 },
+  borrowingCardWrap: { borderRadius: 18, overflow: 'hidden' },
+  borrowingCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 18,
+    borderRadius: 18,
+    gap: 14,
+  },
+  borrowingIconWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  borrowingCopy: { flex: 1 },
+  borrowingLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 1.2 },
+  borrowingAmount: { fontSize: 24, fontWeight: '800', marginTop: 4 },
+  borrowingSub: { fontSize: 12, fontWeight: '600', marginTop: 4 },
   bentoRow: { flexDirection: 'row', gap: 12 },
   bentoCard: { flex: 1, borderRadius: 16, padding: 14, borderWidth: 1, minHeight: 112, justifyContent: 'space-between' },
   bentoLabel: { fontSize: 11, fontWeight: '700' },
@@ -308,21 +562,102 @@ const styles = StyleSheet.create({
   liabilityLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 1 },
   liabilityName: { fontSize: 14, fontWeight: '700' },
   card: { borderRadius: 16, padding: 16, borderWidth: 1 },
+  gradientCardWrap: { borderRadius: 16, overflow: 'hidden' },
+  gradientCard: { borderRadius: 16, padding: 16 },
+  gradientCardTitle: { marginBottom: 14 },
   cardTitle: { fontSize: 16, fontWeight: '700', marginBottom: 12 },
-  chartRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end', height: 100 },
+  sectionTitle: { fontSize: 15, fontWeight: '700', marginBottom: 14 },
+  chartRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end', height: 130, paddingTop: 4 },
   barCol: { alignItems: 'center', flex: 1 },
-  barTrack: { width: 20, height: 80, borderRadius: 4, justifyContent: 'flex-end', overflow: 'hidden' },
-  barFill: { width: '100%', borderRadius: 4 },
-  barLabel: { fontSize: 10, marginTop: 4 },
-  catRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 8 },
-  catName: { width: 80, fontSize: 12, fontWeight: '600' },
-  catTrack: { flex: 1, height: 6, borderRadius: 3, overflow: 'hidden' },
-  catFill: { height: '100%', borderRadius: 3 },
-  catAmt: { width: 70, fontSize: 11, textAlign: 'right' },
-  expensiveTitle: { fontSize: 16, fontWeight: '600' },
+  barValueLabel: { fontSize: 11, fontWeight: '700', marginBottom: 4 },
+  barValueSpacer: { height: 15, marginBottom: 4 },
+  barTrack: { width: 28, height: 88, borderRadius: 10, justifyContent: 'flex-end', overflow: 'hidden' },
+  barFill: { width: '100%', borderTopLeftRadius: 10, borderTopRightRadius: 10 },
+  barLabel: { fontSize: 11, marginTop: 6, fontWeight: '500' },
+  catBreakdownItem: { marginBottom: 14 },
+  catBreakdownHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
+  catBreakdownLeft: { flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 },
+  catDot: { width: 10, height: 10, borderRadius: 5 },
+  catName: { fontSize: 14, fontWeight: '600' },
+  catTrack: { height: 8, borderRadius: 4, overflow: 'hidden' },
+  catFill: { height: '100%', borderRadius: 4 },
+  catAmt: { fontSize: 12, fontWeight: '700' },
+  expensiveCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    gap: 12,
+  },
+  expensiveLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
+  expensiveIconCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  expensiveCopy: { flex: 1 },
+  expensiveLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.8 },
+  expensiveTitle: { fontSize: 16, fontWeight: '800', marginTop: 4 },
+  expensiveCategory: { fontSize: 12, marginTop: 2 },
+  expensiveAmount: { color: '#FB7185', fontWeight: '800', fontSize: 20 },
   goalItem: { borderBottomWidth: 1, paddingVertical: 12 },
   goalName: { fontSize: 15, fontWeight: '700' },
   contribBtn: { alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8, marginTop: 8 },
+  sectionHeading: { fontSize: 16, fontWeight: '700', marginBottom: 10 },
+  actionRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
+  actionCardWrap: { flex: 1, borderRadius: 12, overflow: 'hidden' },
+  actionCardPressed: { opacity: 0.9, transform: [{ scale: 0.98 }] },
+  actionCard: {
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 88,
+    gap: 8,
+  },
+  actionIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionCardLabel: {
+    color: '#F8FAFC',
+    fontSize: 10,
+    fontWeight: '700',
+    textAlign: 'center',
+    lineHeight: 13,
+  },
+  sheetCardWrap: { borderRadius: 12, overflow: 'hidden', marginTop: 8 },
+  sheetCard: {
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  sheetCardLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
+  sheetCardLabel: { color: '#F0FDFA', fontSize: 12, fontWeight: '700' },
+  navCardWrap: { flex: 1, borderRadius: 12, overflow: 'hidden' },
+  navCard: {
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 96,
+    gap: 6,
+  },
+  navCardLabel: { color: '#F8FAFC', fontSize: 11, fontWeight: '700', textAlign: 'center' },
+  navCardValue: { color: '#FFFFFF', fontSize: 13, fontWeight: '800', textAlign: 'center' },
   autoRow: { flexDirection: 'row', gap: 8 },
   autoBtn: { flex: 1, padding: 12, borderRadius: 12, alignItems: 'center' },
   navBtn: { flex: 1, padding: 12, borderRadius: 12, borderWidth: 1, alignItems: 'center' },

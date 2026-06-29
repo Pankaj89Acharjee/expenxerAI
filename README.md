@@ -170,3 +170,10 @@ npm install
 ```
 
 Then commit and push the code in github and then again run the eas build process : ```eas build -p android --profile production```
+
+
+### Future Project Expansions Plan
+
+1. A comparison line chart where line A shows usual spending trends and line B shows current month's spending trend.
+
+2. AI/ML intergration for detecting spikes in expenditure and alert user on that category and when usually occurs throughout the year.

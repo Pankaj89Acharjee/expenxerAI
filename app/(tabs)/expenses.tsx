@@ -2,6 +2,7 @@ import { MaterialIcons } from '@expo/vector-icons';
 import DateTimePicker, { type DateTimePickerChangeEvent } from '@react-native-community/datetimepicker';
 import * as ImagePicker from 'expo-image-picker';
 import { Image } from 'expo-image';
+import { useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -52,6 +53,7 @@ function withinTimeFrame(dateMillis: number, days: number): boolean {
 }
 
 export default function ExpenseScreen() {
+  const { category: categoryParam } = useLocalSearchParams<{ category?: string }>();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
   const colors = themeColors(isDark);
@@ -83,6 +85,12 @@ export default function ExpenseScreen() {
   const [settlementDate, setSettlementDate] = useState(startOfDay(Date.now()));
   const [showSettlementDatePicker, setShowSettlementDatePicker] = useState(false);
   const [settlingSaving, setSettlingSaving] = useState(false);
+
+  useEffect(() => {
+    if (categoryParam && (EXPENSE_CATEGORIES as readonly string[]).includes(categoryParam)) {
+      setSelectedCategory(categoryParam);
+    }
+  }, [categoryParam]);
 
   const isSettlementView = SETTLEMENT_CATEGORIES.has(selectedCategory);
   const activeTimeFrame = TIME_FRAMES.find((t) => t.key === timeFrame) ?? TIME_FRAMES[1];
@@ -253,7 +261,149 @@ export default function ExpenseScreen() {
     ]);
   };
 
-  const listHeader = (
+  const categoryChips = (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} nestedScrollEnabled contentContainerStyle={styles.catRow}>
+      {EXPENSE_CATEGORIES.map((cat) => (
+        <Pressable
+          key={cat}
+          style={[
+            styles.catChip,
+            { backgroundColor: colors.surfaceVariant, borderColor: colors.border },
+            selectedCategory === cat && { backgroundColor: colors.primary, borderColor: colors.primary },
+          ]}
+          onPress={() => setSelectedCategory(cat)}
+        >
+          <Text style={[styles.catChipText, { color: selectedCategory === cat ? '#fff' : colors.text }]}>{cat}</Text>
+        </Pressable>
+      ))}
+    </ScrollView>
+  );
+
+  const budgetStrip =
+    categoryBudgets.length > 0 ? (
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} nestedScrollEnabled contentContainerStyle={styles.budgetRow}>
+        {categoryBudgets.map((b) => {
+          const spent = categorySpent.get(b.category.toLowerCase()) ?? 0;
+          const over = spent > b.limitAmount;
+          return (
+            <View
+              key={b.id}
+              style={[
+                styles.budgetCard,
+                { backgroundColor: over ? colors.errorContainer : colors.surfaceVariant, borderColor: over ? colors.error : colors.border },
+              ]}
+            >
+              <Text style={[styles.budgetCat, { color: over ? colors.error : colors.text }]}>{b.category}</Text>
+              <Text style={{ fontSize: 12, color: colors.textMuted }}>
+                ₹{spent.toFixed(1)} / ₹{b.limitAmount.toFixed(0)}
+              </Text>
+              <View style={[styles.budgetBar, { backgroundColor: colors.border }]}>
+                <View
+                  style={{
+                    height: '100%',
+                    width: `${Math.min(spent / b.limitAmount, 1) * 100}%`,
+                    backgroundColor: over ? colors.error : colors.primary,
+                    borderRadius: 2,
+                  }}
+                />
+              </View>
+            </View>
+          );
+        })}
+      </ScrollView>
+    ) : null;
+
+  const settlementPanel = isSettlementView ? (
+    <View style={[styles.settlementCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+      <View style={styles.settlementHeader}>
+        <MaterialIcons name="account-balance-wallet" size={22} color={colors.primary} />
+        <Text style={[styles.settlementTitle, { color: colors.text }]}>{selectedCategory} — Settlement</Text>
+      </View>
+      <Text style={{ color: colors.textMuted, fontSize: 12, marginBottom: 10 }}>
+        Outstanding in last {activeTimeFrame.label}
+      </Text>
+      <Text style={[styles.settlementTotal, { color: colors.primary }]}>{formatCurrency(outstandingTotal)}</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} nestedScrollEnabled contentContainerStyle={styles.timeRow}>
+        {TIME_FRAMES.map((frame) => (
+          <Pressable
+            key={frame.key}
+            style={[
+              styles.timeChip,
+              { borderColor: colors.border, backgroundColor: colors.surfaceVariant },
+              timeFrame === frame.key && { backgroundColor: Colors.indigo, borderColor: Colors.indigo },
+            ]}
+            onPress={() => setTimeFrame(frame.key)}
+          >
+            <Text style={{ color: timeFrame === frame.key ? '#fff' : colors.text, fontSize: 13, fontWeight: '600' }}>
+              {frame.label}
+            </Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+      <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 8 }}>Tap checkbox on an item to record payback</Text>
+    </View>
+  ) : null;
+
+  const totalPanel = (
+    <View style={[styles.totalCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+      <Text style={{ color: colors.textMuted, fontSize: 12 }}>
+        {isSettlementView ? `Total (${activeTimeFrame.label})` : 'Filtered Total'}
+      </Text>
+      <Text style={{ color: colors.text, fontSize: 22, fontWeight: '800' }}>{formatCurrency(totalFiltered)}</Text>
+      <Text style={{ color: colors.textMuted, fontSize: 12 }}>{filtered.length} transactions</Text>
+    </View>
+  );
+
+  const renderExpenseItem = ({ item }: { item: Expense }) => (
+    <Pressable
+      style={[
+        styles.expenseItem,
+        { backgroundColor: colors.card, borderColor: colors.border },
+        item.isSettled && { opacity: 0.65 },
+      ]}
+      onPress={() => openEdit(item)}
+      onLongPress={() => handleDelete(item)}
+    >
+      {isSettlementView ? (
+        <Pressable
+          style={[
+            styles.checkbox,
+            {
+              borderColor: item.isSettled ? colors.primary : colors.border,
+              backgroundColor: item.isSettled ? colors.primary : 'transparent',
+            },
+          ]}
+          onPress={() => openSettlement(item)}
+          hitSlop={8}
+        >
+          {item.isSettled ? <MaterialIcons name="check" size={16} color="#fff" /> : null}
+        </Pressable>
+      ) : (
+        <Text style={styles.expenseIcon}>{CATEGORY_ICONS[item.category] ?? '📦'}</Text>
+      )}
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.expenseTitle, { color: colors.text }]}>{item.title}</Text>
+        <Text style={{ color: colors.textMuted, fontSize: 12 }}>
+          {item.category} • {formatDate(item.dateMillis)}
+        </Text>
+        {item.isSettled && item.settlementDateMillis ? (
+          <Text style={{ color: colors.emeraldText, fontSize: 11, marginTop: 2 }}>
+            Settled {formatDate(item.settlementDateMillis)}
+            {item.settlementNote ? ` — ${item.settlementNote}` : ''}
+          </Text>
+        ) : null}
+      </View>
+      <Text style={[styles.expenseAmt, { color: colors.primary }]}>{formatCurrency(item.amount)}</Text>
+    </Pressable>
+  );
+
+  const emptyList = (
+    <Text style={{ textAlign: 'center', color: colors.textMuted, marginTop: 24 }}>
+      No expenses found. Tap + to add one.
+    </Text>
+  );
+
+  const settlementScrollHeader = (
     <View style={styles.headerBlock}>
       <TextInput
         style={[styles.search, { color: colors.text, borderColor: colors.border, backgroundColor: colors.card }]}
@@ -262,167 +412,52 @@ export default function ExpenseScreen() {
         value={search}
         onChangeText={setSearch}
       />
-
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        nestedScrollEnabled
-        contentContainerStyle={styles.catRow}
-      >
-        {EXPENSE_CATEGORIES.map((cat) => (
-          <Pressable
-            key={cat}
-            style={[
-              styles.catChip,
-              { backgroundColor: colors.surfaceVariant, borderColor: colors.border },
-              selectedCategory === cat && { backgroundColor: colors.primary, borderColor: colors.primary },
-            ]}
-            onPress={() => setSelectedCategory(cat)}
-          >
-            <Text style={[styles.catChipText, { color: selectedCategory === cat ? '#fff' : colors.text }]}>
-              {cat}
-            </Text>
-          </Pressable>
-        ))}
-      </ScrollView>
-
-      {categoryBudgets.length > 0 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} nestedScrollEnabled contentContainerStyle={styles.budgetRow}>
-          {categoryBudgets.map((b) => {
-            const spent = categorySpent.get(b.category.toLowerCase()) ?? 0;
-            const over = spent > b.limitAmount;
-            return (
-              <View
-                key={b.id}
-                style={[
-                  styles.budgetCard,
-                  { backgroundColor: over ? colors.errorContainer : colors.surfaceVariant, borderColor: over ? colors.error : colors.border },
-                ]}
-              >
-                <Text style={[styles.budgetCat, { color: over ? colors.error : colors.text }]}>{b.category}</Text>
-                <Text style={{ fontSize: 12, color: colors.textMuted }}>
-                  ₹{spent.toFixed(1)} / ₹{b.limitAmount.toFixed(0)}
-                </Text>
-                <View style={[styles.budgetBar, { backgroundColor: colors.border }]}>
-                  <View
-                    style={{
-                      height: '100%',
-                      width: `${Math.min(spent / b.limitAmount, 1) * 100}%`,
-                      backgroundColor: over ? colors.error : colors.primary,
-                      borderRadius: 2,
-                    }}
-                  />
-                </View>
-              </View>
-            );
-          })}
-        </ScrollView>
-      )}
-
-      {isSettlementView && (
-        <View style={[styles.settlementCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <View style={styles.settlementHeader}>
-            <MaterialIcons name="account-balance-wallet" size={22} color={colors.primary} />
-            <Text style={[styles.settlementTitle, { color: colors.text }]}>
-              {selectedCategory} — Settlement
-            </Text>
-          </View>
-          <Text style={{ color: colors.textMuted, fontSize: 12, marginBottom: 10 }}>
-            Outstanding in last {activeTimeFrame.label}
-          </Text>
-          <Text style={[styles.settlementTotal, { color: colors.primary }]}>
-            {formatCurrency(outstandingTotal)}
-          </Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} nestedScrollEnabled contentContainerStyle={styles.timeRow}>
-            {TIME_FRAMES.map((frame) => (
-              <Pressable
-                key={frame.key}
-                style={[
-                  styles.timeChip,
-                  { borderColor: colors.border, backgroundColor: colors.surfaceVariant },
-                  timeFrame === frame.key && { backgroundColor: Colors.indigo, borderColor: Colors.indigo },
-                ]}
-                onPress={() => setTimeFrame(frame.key)}
-              >
-                <Text style={{ color: timeFrame === frame.key ? '#fff' : colors.text, fontSize: 13, fontWeight: '600' }}>
-                  {frame.label}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-          <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 8 }}>
-            Tap checkbox on an item to record payback
-          </Text>
-        </View>
-      )}
-
-      <View style={[styles.totalCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-        <Text style={{ color: colors.textMuted, fontSize: 12 }}>
-          {isSettlementView ? `Total (${activeTimeFrame.label})` : 'Filtered Total'}
-        </Text>
-        <Text style={{ color: colors.text, fontSize: 22, fontWeight: '800' }}>{formatCurrency(totalFiltered)}</Text>
-        <Text style={{ color: colors.textMuted, fontSize: 12 }}>{filtered.length} transactions</Text>
-      </View>
+      {categoryChips}
+      {settlementPanel}
+      {totalPanel}
     </View>
   );
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <FlatList
-        style={styles.list}
-        data={filtered}
-        keyExtractor={(item) => item.id}
-        ListHeaderComponent={listHeader}
-        contentContainerStyle={styles.listContent}
-        keyboardShouldPersistTaps="handled"
-        renderItem={({ item }) => (
-          <Pressable
-            style={[
-              styles.expenseItem,
-              { backgroundColor: colors.card, borderColor: colors.border },
-              item.isSettled && { opacity: 0.65 },
-            ]}
-            onPress={() => openEdit(item)}
-            onLongPress={() => handleDelete(item)}
-          >
-            {isSettlementView ? (
-              <Pressable
-                style={[
-                  styles.checkbox,
-                  {
-                    borderColor: item.isSettled ? colors.primary : colors.border,
-                    backgroundColor: item.isSettled ? colors.primary : 'transparent',
-                  },
-                ]}
-                onPress={() => openSettlement(item)}
-                hitSlop={8}
-              >
-                {item.isSettled ? <MaterialIcons name="check" size={16} color="#fff" /> : null}
-              </Pressable>
-            ) : (
-              <Text style={styles.expenseIcon}>{CATEGORY_ICONS[item.category] ?? '📦'}</Text>
-            )}
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.expenseTitle, { color: colors.text }]}>{item.title}</Text>
-              <Text style={{ color: colors.textMuted, fontSize: 12 }}>
-                {item.category} • {formatDate(item.dateMillis)}
-              </Text>
-              {item.isSettled && item.settlementDateMillis ? (
-                <Text style={{ color: colors.emeraldText, fontSize: 11, marginTop: 2 }}>
-                  Settled {formatDate(item.settlementDateMillis)}
-                  {item.settlementNote ? ` — ${item.settlementNote}` : ''}
-                </Text>
-              ) : null}
-            </View>
-            <Text style={[styles.expenseAmt, { color: colors.primary }]}>{formatCurrency(item.amount)}</Text>
-          </Pressable>
-        )}
-        ListEmptyComponent={
-          <Text style={{ textAlign: 'center', color: colors.textMuted, marginTop: 24 }}>
-            No expenses found. Tap + to add one.
-          </Text>
-        }
-      />
+      {isSettlementView ? (
+        <FlatList
+          style={styles.list}
+          data={filtered}
+          keyExtractor={(item) => item.id}
+          ListHeaderComponent={settlementScrollHeader}
+          contentContainerStyle={styles.listContent}
+          keyboardShouldPersistTaps="handled"
+          renderItem={renderExpenseItem}
+          ListEmptyComponent={emptyList}
+        />
+      ) : (
+        <>
+          <View style={styles.fixedTop}>
+            <TextInput
+              style={[styles.search, { color: colors.text, borderColor: colors.border, backgroundColor: colors.card }]}
+              placeholder="Search description or notes..."
+              placeholderTextColor={colors.textMuted}
+              value={search}
+              onChangeText={setSearch}
+            />
+            {categoryChips}
+            {budgetStrip}
+            {totalPanel}
+          </View>
+          <View style={[styles.listContainer, { borderColor: colors.border, backgroundColor: colors.card }]}>
+            <FlatList
+              data={filtered}
+              keyExtractor={(item) => item.id}
+              contentContainerStyle={styles.listContainerContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator
+              renderItem={renderExpenseItem}
+              ListEmptyComponent={emptyList}
+            />
+          </View>
+        </>
+      )}
 
       <Pressable
         style={[styles.fab, { backgroundColor: colors.primary }]}
@@ -591,6 +626,16 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   list: { flex: 1 },
   listContent: { paddingHorizontal: 16, paddingBottom: 88 },
+  fixedTop: { paddingHorizontal: 16, paddingTop: 16, gap: 10, paddingBottom: 8 },
+  listContainer: {
+    flex: 1,
+    marginHorizontal: 16,
+    marginBottom: 8,
+    borderRadius: 16,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  listContainerContent: { padding: 12, paddingBottom: 88 },
   headerBlock: { gap: 10, paddingTop: 16 },
   search: { borderWidth: 1, borderRadius: 12, padding: 12 },
   catRow: { gap: 8, paddingVertical: 2, paddingRight: 8 },
@@ -613,7 +658,7 @@ const styles = StyleSheet.create({
   settlementTotal: { fontSize: 26, fontWeight: '800', marginBottom: 10 },
   timeRow: { gap: 8 },
   timeChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, borderWidth: 1 },
-  totalCard: { borderRadius: 12, padding: 14, borderWidth: 1 },
+  totalCard: { borderRadius: 12, padding: 14, borderWidth: 1, marginBottom: 0 },
   expenseItem: { flexDirection: 'row', alignItems: 'center', padding: 14, borderRadius: 12, borderWidth: 1, marginBottom: 8, gap: 12 },
   expenseIcon: { fontSize: 24, width: 28, textAlign: 'center' },
   checkbox: {
