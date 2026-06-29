@@ -41,3 +41,7 @@ client_secret*.json
 # generated native folders
 /ios
 /android
+
+
+# Google Services
+google-services.json
