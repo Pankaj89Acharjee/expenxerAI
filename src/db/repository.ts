@@ -69,25 +69,61 @@ function calculateSavingMetrics(goal: SavingGoal): SavingGoal {
 }
 
 // --- User Profile ---
+type UserProfileRow = {
+  email: string;
+  displayName: string;
+  photoUrl: string | null;
+  monthlyIncome: number;
+  baseSavingsRatePercent: number;
+  alertPreference: number;
+  designation?: string | null;
+  addressLine?: string | null;
+  town?: string | null;
+  policeStation?: string | null;
+  district?: string | null;
+  pinCode?: string | null;
+  state?: string | null;
+  areaOfInterest?: string | null;
+  splitwiseHandle?: string | null;
+};
+
+function mapUserProfile(row: UserProfileRow): UserProfile {
+  return {
+    email: row.email,
+    displayName: row.displayName,
+    photoUrl: row.photoUrl,
+    monthlyIncome: row.monthlyIncome,
+    baseSavingsRatePercent: row.baseSavingsRatePercent,
+    alertPreference: row.alertPreference === 1,
+    designation: row.designation ?? null,
+    addressLine: row.addressLine ?? null,
+    town: row.town ?? null,
+    policeStation: row.policeStation ?? null,
+    district: row.district ?? null,
+    pinCode: row.pinCode ?? null,
+    state: row.state ?? null,
+    areaOfInterest: row.areaOfInterest ?? null,
+    splitwiseHandle: row.splitwiseHandle ?? null,
+  };
+}
+
 export async function getUserProfile(email: string): Promise<UserProfile | null> {
   const db = await getDatabase();
-  const row = await db.getFirstAsync<{
-    email: string;
-    displayName: string;
-    photoUrl: string | null;
-    monthlyIncome: number;
-    baseSavingsRatePercent: number;
-    alertPreference: number;
-  }>('SELECT * FROM user_profiles WHERE email = ?', [email]);
+  const row = await db.getFirstAsync<UserProfileRow>(
+    'SELECT * FROM user_profiles WHERE email = ?',
+    [email]
+  );
   if (!row) return null;
-  return { ...row, alertPreference: row.alertPreference === 1 };
+  return mapUserProfile(row);
 }
 
 export async function saveUserProfile(profile: UserProfile): Promise<void> {
   const db = await getDatabase();
   await db.runAsync(
-    `INSERT OR REPLACE INTO user_profiles (email, displayName, photoUrl, monthlyIncome, baseSavingsRatePercent, alertPreference)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO user_profiles (
+      email, displayName, photoUrl, monthlyIncome, baseSavingsRatePercent, alertPreference,
+      designation, addressLine, town, policeStation, district, pinCode, state, areaOfInterest, splitwiseHandle
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       profile.email,
       profile.displayName,
@@ -95,6 +131,15 @@ export async function saveUserProfile(profile: UserProfile): Promise<void> {
       profile.monthlyIncome,
       profile.baseSavingsRatePercent,
       profile.alertPreference ? 1 : 0,
+      profile.designation ?? null,
+      profile.addressLine ?? null,
+      profile.town ?? null,
+      profile.policeStation ?? null,
+      profile.district ?? null,
+      profile.pinCode ?? null,
+      profile.state ?? null,
+      profile.areaOfInterest ?? null,
+      profile.splitwiseHandle ?? null,
     ]
   );
 }

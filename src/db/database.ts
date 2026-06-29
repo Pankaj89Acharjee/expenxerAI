@@ -119,4 +119,27 @@ async function initSchema(db: SQLite.SQLiteDatabase): Promise<void> {
       monthYear TEXT NOT NULL
     );
   `);
+
+  await migrateUserProfiles(db);
+}
+
+async function migrateUserProfiles(db: SQLite.SQLiteDatabase): Promise<void> {
+  const cols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(user_profiles)');
+  const existing = new Set(cols.map((c) => c.name));
+  const additions: [string, string][] = [
+    ['designation', 'TEXT'],
+    ['addressLine', 'TEXT'],
+    ['town', 'TEXT'],
+    ['policeStation', 'TEXT'],
+    ['district', 'TEXT'],
+    ['pinCode', 'TEXT'],
+    ['state', 'TEXT'],
+    ['areaOfInterest', 'TEXT'],
+    ['splitwiseHandle', 'TEXT'],
+  ];
+  for (const [name, type] of additions) {
+    if (!existing.has(name)) {
+      await db.execAsync(`ALTER TABLE user_profiles ADD COLUMN ${name} ${type}`);
+    }
+  }
 }

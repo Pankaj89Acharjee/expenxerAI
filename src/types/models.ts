@@ -84,6 +84,40 @@ export interface UserProfile {
   monthlyIncome: number;
   baseSavingsRatePercent: number;
   alertPreference: boolean;
+  designation?: string | null;
+  addressLine?: string | null;
+  town?: string | null;
+  policeStation?: string | null;
+  district?: string | null;
+  pinCode?: string | null;
+  state?: string | null;
+  areaOfInterest?: string | null;
+  splitwiseHandle?: string | null;
+}
+
+export function defaultProfileExtras(): Pick<
+  UserProfile,
+  | 'designation'
+  | 'addressLine'
+  | 'town'
+  | 'policeStation'
+  | 'district'
+  | 'pinCode'
+  | 'state'
+  | 'areaOfInterest'
+  | 'splitwiseHandle'
+> {
+  return {
+    designation: null,
+    addressLine: null,
+    town: null,
+    policeStation: null,
+    district: null,
+    pinCode: null,
+    state: null,
+    areaOfInterest: null,
+    splitwiseHandle: null,
+  };
 }
 
 export interface BudgetTemplate {

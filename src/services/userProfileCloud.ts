@@ -1,6 +1,7 @@
 import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { getFirebaseConfig } from '@/src/config/firebase';
 import { getFirebaseAuth, getFirebaseFirestore } from '@/src/services/firebase';
+import { profileFromFirestore, profileToFirestore } from '@/src/services/profileMapper';
 import type { UserProfile } from '@/src/types/models';
 
 const USERS = 'users';
@@ -9,7 +10,7 @@ function profileRef(uid: string) {
   return doc(getFirebaseFirestore(), USERS, uid);
 }
 
-type CloudProfile = UserProfile & { updatedAt?: unknown };
+type CloudProfile = Record<string, unknown> & { updatedAt?: unknown };
 
 type StorageUploadResponse = {
   downloadTokens?: string;
@@ -48,28 +49,13 @@ export async function fetchCloudProfile(uid: string): Promise<UserProfile | null
   if (!snap.exists()) return null;
 
   const data = snap.data() as CloudProfile;
-  return {
-    email: data.email,
-    displayName: data.displayName,
-    photoUrl: data.photoUrl ?? null,
-    monthlyIncome: data.monthlyIncome,
-    baseSavingsRatePercent: data.baseSavingsRatePercent,
-    alertPreference: data.alertPreference,
-  };
+  return profileFromFirestore(data);
 }
 
 export async function saveCloudProfile(uid: string, profile: UserProfile): Promise<void> {
   await setDoc(
     profileRef(uid),
-    {
-      email: profile.email,
-      displayName: profile.displayName,
-      photoUrl: profile.photoUrl ?? null,
-      monthlyIncome: profile.monthlyIncome,
-      baseSavingsRatePercent: profile.baseSavingsRatePercent,
-      alertPreference: profile.alertPreference,
-      updatedAt: serverTimestamp(),
-    },
+    { ...profileToFirestore(profile), updatedAt: serverTimestamp() },
     { merge: true }
   );
 }

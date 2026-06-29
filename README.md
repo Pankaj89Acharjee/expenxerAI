@@ -72,7 +72,7 @@ Profile data syncs to **`users/{firebaseAuthUid}`** in Firestore. Profile photos
 
 **This is the Rule for Firestore (when collections like users are kept)**
     - This rule is for 30 days development trial. May be required to convert it into Production.
-    
+                
 ```javascript
 rules_version = '2';
 

@@ -33,6 +33,7 @@ import type {
   Subscription,
   UserProfile,
 } from '@/src/types/models';
+import { defaultProfileExtras } from '@/src/types/models';
 import { currentMonthYear, parseJsonToMap } from '@/src/utils/format';
 
 const PREFS = {
@@ -76,6 +77,7 @@ async function syncUserProfile(
     monthlyIncome: monthlyIncome ?? 5000,
     baseSavingsRatePercent: 20,
     alertPreference: true,
+    ...defaultProfileExtras(),
   };
   await repo.saveUserProfile(profile);
   await saveCloudProfile(uid, profile);
@@ -131,7 +133,7 @@ interface FinancialState {
   ) => Promise<string | null>;
   signInAccount: (email: string, password: string) => Promise<string | null>;
   logout: () => Promise<void>;
-  updateProfile: (displayName: string, income: number, savingsRate: number, alertEnabled: boolean, photoUrl?: string | null) => Promise<void>;
+  updateProfile: (profile: UserProfile) => Promise<void>;
   uploadProfilePhoto: (localUri: string) => Promise<string | null>;
 
   addExpense: (title: string, amount: number, category: string, notes: string) => Promise<void>;
@@ -295,23 +297,15 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     await signOutUser();
   },
 
-  updateProfile: async (displayName, income, savingsRate, alertEnabled, photoUrl = null) => {
+  updateProfile: async (profile) => {
     const email = get().currentUserEmail;
     const uid = getFirebaseAuth().currentUser?.uid;
-    if (!email) return;
+    if (!email || profile.email !== email) return;
 
-    const profile: UserProfile = {
-      email,
-      displayName,
-      monthlyIncome: income,
-      baseSavingsRatePercent: savingsRate,
-      alertPreference: alertEnabled,
-      photoUrl,
-    };
     await repo.saveUserProfile(profile);
     if (uid) await saveCloudProfile(uid, profile);
-    await updateAuthDisplayName(displayName);
-    if (photoUrl) await updateAuthPhotoUrl(photoUrl);
+    await updateAuthDisplayName(profile.displayName);
+    if (profile.photoUrl) await updateAuthPhotoUrl(profile.photoUrl);
     await repo.addSystemLog(email, 'Profile Updated', 'Customized profile adjustments successfully stored.', 'SYSTEM');
     await get().refreshUserData();
   },
@@ -476,7 +470,14 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     if (profile) {
       await repo.saveUserProfile({ ...profile, monthlyIncome: template.monthlyIncome });
     } else {
-      await repo.saveUserProfile({ email, displayName: 'User', monthlyIncome: template.monthlyIncome, baseSavingsRatePercent: 20, alertPreference: true });
+      await repo.saveUserProfile({
+        email,
+        displayName: 'User',
+        monthlyIncome: template.monthlyIncome,
+        baseSavingsRatePercent: 20,
+        alertPreference: true,
+        ...defaultProfileExtras(),
+      });
     }
 
     const savingsGoalsMap = parseJsonToMap(template.savingsGoalsJson);
