@@ -177,3 +177,5 @@ Then commit and push the code in github and then again run the eas build process
 1. A comparison line chart where line A shows usual spending trends and line B shows current month's spending trend.
 
 2. AI/ML intergration for detecting spikes in expenditure and alert user on that category and when usually occurs throughout the year.
+
+3. Use ```Gemini Vision``` for reading bill and returning structured field in one step for adding new expenditure while only bill is uploaded.

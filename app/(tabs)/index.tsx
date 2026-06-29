@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { useColorScheme } from '@/components/useColorScheme';
@@ -174,12 +175,37 @@ export default function DashboardScreen() {
   return (
     <ScrollView style={[styles.container, { backgroundColor: colors.background }]} contentContainerStyle={styles.content}>
       <View style={styles.header}>
-        <View>
-          <Text style={[styles.archLabel, { color: colors.primary }]}>PERSONAL EXPENXER</Text>
-          <Text style={[styles.greeting, { color: colors.text }]}>{greeting()}, {profile?.displayName ?? 'there'}</Text>
-        </View>
-        <View style={[styles.avatar, { backgroundColor: colors.primary + '20' }]}>
-          <Text style={[styles.avatarText, { color: colors.primary }]}>{(profile?.displayName ?? 'A').slice(0, 2).toUpperCase()}</Text>
+        <Text style={[styles.archLabel, { color: colors.primary }]}>PERSONAL EXPENXER</Text>
+        <View style={styles.headerRow}>
+          <Pressable
+            onPress={() => router.push('/(tabs)/profile')}
+            style={({ pressed }) => [pressed && styles.headerPressablePressed]}
+            accessibilityRole="button"
+            accessibilityLabel="Open profile"
+          >
+            <View style={[styles.profilePhoto, { backgroundColor: colors.primary + '20', borderColor: colors.border }]}>
+              {profile?.photoUrl ? (
+                <Image source={{ uri: profile.photoUrl }} style={styles.profilePhotoImage} contentFit="cover" />
+              ) : (
+                <Text style={[styles.profilePhotoFallback, { color: colors.primary }]}>
+                  {(profile?.displayName ?? 'A').slice(0, 2).toUpperCase()}
+                </Text>
+              )}
+            </View>
+          </Pressable>
+          <View style={styles.headerCopy}>
+            <Text style={[styles.salutation, { color: colors.textMuted }]}>{greeting()},</Text>
+            <Pressable
+              onPress={() => router.push('/(tabs)/profile')}
+              style={({ pressed }) => [pressed && styles.headerPressablePressed]}
+              accessibilityRole="button"
+              accessibilityLabel="Open profile"
+            >
+              <Text style={[styles.displayName, { color: colors.text }]} numberOfLines={1}>
+                {profile?.displayName ?? 'there'}
+              </Text>
+            </Pressable>
+          </View>
         </View>
       </View>
 
@@ -523,11 +549,24 @@ export default function DashboardScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   content: { padding: 16, paddingBottom: 32, gap: 16 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  header: { gap: 8 },
+  headerRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  profilePhoto: {
+    width: 52,
+    height: 44,
+    borderRadius: 10,
+    borderWidth: 1,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profilePhotoImage: { width: '100%', height: '100%' },
+  profilePhotoFallback: { fontWeight: '800', fontSize: 14 },
+  headerCopy: { flex: 1, justifyContent: 'center', gap: 2 },
+  headerPressablePressed: { opacity: 0.72 },
   archLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
-  greeting: { fontSize: 20, fontWeight: '700', marginTop: 2 },
-  avatar: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
-  avatarText: { fontWeight: '800', fontSize: 14 },
+  salutation: { fontSize: 14, fontWeight: '600', lineHeight: 18 },
+  displayName: { fontSize: 17, fontWeight: '700', lineHeight: 22 },
   heroCard: { borderRadius: 20, padding: 20 },
   heroLabel: { color: '#94A3B8', fontSize: 10, fontWeight: '800', letterSpacing: 1 },
   heroAmount: { color: '#fff', fontSize: 28, fontWeight: '800', marginTop: 4 },

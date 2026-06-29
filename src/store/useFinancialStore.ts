@@ -215,7 +215,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   selectedGroupId: null,
   aiCoachChat: [
     {
-      text: 'Hello! I am your Expenxer Advisor. How can I help you optimize your wealth or review your savings plan today?',
+      text: 'Hello! I am your Expenxer Advisor. How may I help you?',
       isUser: false,
     },
   ],
@@ -635,7 +635,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     const subText = subscriptions.map((s) => `${s.name}(₹${s.cost}/mo)`).join(', ');
     const goalsText = savingGoals.map((g) => `${g.name}(target ₹${g.targetAmount}, saved ₹${g.savedAmount}, monthly rate: ₹${g.currentRequiredMonthly})`).join(', ');
 
-    const systemPrompt = `You are the FutureFund AI Advisor. Keep responses focused, clear, and highly professional.
+    const systemPrompt = `You are the Expenxer AI Advisor and Expert. Keep responses focused, clear, precise and highly professional.
 Here is the user's active financial sheet:
 - Monthly Income: ₹${userIncome}
 - General Expenses logged: ₹${totalExpenses}

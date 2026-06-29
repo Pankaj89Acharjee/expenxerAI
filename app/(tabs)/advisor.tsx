@@ -14,12 +14,6 @@ import { useColorScheme } from '@/components/useColorScheme';
 import { useFinancialStore } from '@/src/store/useFinancialStore';
 import { themeColors } from '@/src/theme/colors';
 
-const SUGGESTED_PROMPTS = [
-  'How can I reduce my monthly expenses?',
-  'Am I on track with my savings goals?',
-  'Review my subscription costs',
-  'What liabilities should I prioritize?',
-];
 
 export default function AdvisorScreen() {
   const colorScheme = useColorScheme();
@@ -48,8 +42,8 @@ export default function AdvisorScreen() {
       <View style={[styles.headerCard, { backgroundColor: colors.surfaceVariant }]}>
         <Text style={{ fontSize: 24 }}>✨</Text>
         <View style={{ marginLeft: 12, flex: 1 }}>
-          <Text style={[styles.headerTitle, { color: colors.text }]}>FutureFund Copilot AI</Text>
-          <Text style={{ color: colors.textMuted, fontSize: 12 }}>Ask about savings, liability reductions, or group balances.</Text>
+          <Text style={[styles.headerTitle, { color: colors.text }]}>Expenxer Assistant</Text>
+          <Text style={{ color: colors.textMuted, fontSize: 12 }}>Type anything to get assisted</Text>
         </View>
       </View>
 
@@ -71,13 +65,7 @@ export default function AdvisorScreen() {
         ) : null}
       />
 
-      <View style={styles.promptRow}>
-        {SUGGESTED_PROMPTS.map((p) => (
-          <Pressable key={p} style={[styles.promptChip, { borderColor: colors.border }]} onPress={() => setInput(p)}>
-            <Text style={{ color: colors.primary, fontSize: 11 }}>{p}</Text>
-          </Pressable>
-        ))}
-      </View>
+      
 
       <View style={[styles.inputRow, { borderColor: colors.border, backgroundColor: colors.card }]}>
         <TextInput
@@ -90,7 +78,7 @@ export default function AdvisorScreen() {
           maxLength={500}
         />
         <Pressable style={[styles.sendBtn, { backgroundColor: colors.primary }]} onPress={handleSend} disabled={isAiLoading}>
-          <Text style={{ color: '#fff', fontWeight: '700' }}>→</Text>
+          <Text style={{ color: '#fff', fontWeight: '400', fontSize: 9, padding: 4 }}>Send</Text>
         </Pressable>
       </View>
     </KeyboardAvoidingView>
@@ -107,7 +95,7 @@ const styles = StyleSheet.create({
   botBubble: { borderBottomLeftRadius: 4 },
   promptRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 },
   promptChip: { borderWidth: 1, borderRadius: 16, paddingHorizontal: 10, paddingVertical: 6 },
-  inputRow: { flexDirection: 'row', alignItems: 'flex-end', borderWidth: 1, borderRadius: 24, paddingHorizontal: 12, paddingVertical: 6 },
+  inputRow: { flexDirection: 'row', alignItems: 'flex-end', borderWidth: 1, borderRadius: 18, paddingHorizontal: 12, paddingVertical: 6 },
   input: { flex: 1, maxHeight: 100, fontSize: 15, paddingVertical: 8 },
-  sendBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
+  sendBtn: { width: 36, height: 36, borderRadius: 8, alignItems: 'center', justifyContent: 'center', marginLeft: 8, marginBottom: 4 },
 });
