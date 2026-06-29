@@ -10,7 +10,7 @@ Cross-platform expense and wealth app — Expo/React Native port of the original
 - **Planner** — Annual liabilities, subscriptions, budget templates with apply-to-month
 - **Split** — Group expense splitting with equal-split settlement engine
 - **AI Advisor** — Gemini-powered financial coach chat with full context injection
-- **Profile** — Avatar picker, income/savings rate, logout
+- **Profile** — Gallery photo upload (Firebase Storage), income/savings rate, alerts, cloud sync (Firestore)
 - **Export** — CSV share, PDF print, Google Sheets sync (sandbox + real API), Gmail reports
 
 ## Tech Stack
@@ -61,6 +61,63 @@ Then press `a` for Android, `i` for iOS, or `w` for web.
 4. Restart Expo after editing `.env` (`npx expo start -c`).
 
 **Note:** `client_secret.json` is for OAuth server flows (e.g. Google Sign-In on web). It is **not** needed for Firebase email/password auth. Do not commit it — it is listed in `.gitignore`.
+
+## Firestore + Storage (user profile sync)
+
+Profile data syncs to **`users/{firebaseAuthUid}`** in Firestore. Profile photos upload to **`users/{uid}/avatar.jpg`** in Storage.
+
+1. Enable **Firestore** and **Storage** in Firebase Console.
+2. Publish Firestore rules (see earlier `users/{userId}` rules).
+3. In **Storage → Rules**, publish:
+
+**This is the Rule for Firestore (when collections like users are kept)**
+    - This rule is for 30 days development trial. May be required to convert it into Production.
+    
+```javascript
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+  	match /users/{userId} {
+    	allow read, write: if request.auth != null && request.auth.uid == userId;
+      
+      match /{document=**} {
+      	allow read, write: if request.auth != null && request.auth.uid == userId; 
+      }
+    }
+
+    // This rule allows anyone with your Firestore database reference to view, edit,
+    // and delete all data in your Firestore database. It is useful for getting
+    // started, but it is configured to expire after 30 days because it
+    // leaves your app open to attackers. At that time, all client
+    // requests to your Firestore database will be denied.
+    //
+    // Make sure to write security rules for your app before that time, or else
+    // all client requests to your Firestore database will be denied until you Update
+    // your rules
+    // match /{document=**} {
+    //   allow read, write: if request.time < timestamp.date(2026, 7, 29);
+    // }
+  }
+}
+```
+
+
+**This is the rule for storage**
+```javascript
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /users/{userId}/{allPaths=**} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}
+```
+
+4. Add the same `EXPO_PUBLIC_FIREBASE_*` vars (including `STORAGE_BUCKET`) to **EAS Environment variables** for production APK builds.
+
+On login, the app pulls the cloud profile into local SQLite. On save/upload, it writes to both.
 
 ## Environment
 

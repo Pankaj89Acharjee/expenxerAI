@@ -40,6 +40,13 @@ export async function updateAuthDisplayName(displayName: string): Promise<void> 
   }
 }
 
+export async function updateAuthPhotoUrl(photoUrl: string): Promise<void> {
+  const user = getFirebaseAuth().currentUser;
+  if (user && photoUrl) {
+    await updateProfile(user, { photoURL: photoUrl });
+  }
+}
+
 export function mapFirebaseAuthError(error: unknown): string {
   const code = (error as { code?: string })?.code ?? '';
   switch (code) {

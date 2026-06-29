@@ -9,7 +9,14 @@ import {
   signOutUser,
   subscribeToAuthChanges,
   updateAuthDisplayName,
+  updateAuthPhotoUrl,
 } from '@/src/services/auth';
+import { getFirebaseAuth } from '@/src/services/firebase';
+import {
+  fetchCloudProfile,
+  saveCloudProfile,
+  uploadProfilePhoto as uploadCloudProfilePhoto,
+} from '@/src/services/userProfileCloud';
 import { isFirebaseConfigured } from '@/src/config/firebase';
 import { getFinancialAdvice, suggestCategory as geminiSuggestCategory } from '@/src/services/gemini';
 import { createAndPopulateGoogleSheet, sendGmailReport } from '@/src/services/googleApi';
@@ -37,27 +44,41 @@ const PREFS = {
 let authUnsubscribe: (() => void) | null = null;
 
 async function syncUserProfile(
+  uid: string,
   email: string,
   authDisplayName?: string | null,
   monthlyIncome?: number
 ): Promise<void> {
-  const existing = await repo.getUserProfile(email);
   const firebaseName = authDisplayName?.trim();
+  const [cloud, local] = await Promise.all([
+    fetchCloudProfile(uid).catch(() => null),
+    repo.getUserProfile(email),
+  ]);
 
-  if (!existing) {
-    await repo.saveUserProfile({
-      email,
-      displayName: firebaseName || email.split('@')[0],
-      monthlyIncome: monthlyIncome ?? 5000,
-      baseSavingsRatePercent: 20,
-      alertPreference: true,
-    });
+  if (cloud) {
+    await repo.saveUserProfile(cloud);
     return;
   }
 
-  if (firebaseName && existing.displayName !== firebaseName) {
-    await repo.saveUserProfile({ ...existing, displayName: firebaseName });
+  if (local) {
+    const profile = firebaseName && local.displayName !== firebaseName
+      ? { ...local, displayName: firebaseName }
+      : local;
+    await repo.saveUserProfile(profile);
+    await saveCloudProfile(uid, profile);
+    return;
   }
+
+  const profile: UserProfile = {
+    email,
+    displayName: firebaseName || email.split('@')[0],
+    photoUrl: null,
+    monthlyIncome: monthlyIncome ?? 5000,
+    baseSavingsRatePercent: 20,
+    alertPreference: true,
+  };
+  await repo.saveUserProfile(profile);
+  await saveCloudProfile(uid, profile);
 }
 
 function clearUserState() {
@@ -111,6 +132,7 @@ interface FinancialState {
   signInAccount: (email: string, password: string) => Promise<string | null>;
   logout: () => Promise<void>;
   updateProfile: (displayName: string, income: number, savingsRate: number, alertEnabled: boolean, photoUrl?: string | null) => Promise<void>;
+  uploadProfilePhoto: (localUri: string) => Promise<string | null>;
 
   addExpense: (title: string, amount: number, category: string, notes: string) => Promise<void>;
   updateExpense: (expense: Expense) => Promise<void>;
@@ -192,8 +214,8 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     await new Promise<void>((resolve) => {
       let resolved = false;
       authUnsubscribe = subscribeToAuthChanges(async (user) => {
-        if (user?.email) {
-          await syncUserProfile(user.email, user.displayName);
+        if (user?.email && user.uid) {
+          await syncUserProfile(user.uid, user.email, user.displayName);
           set({ currentUserEmail: user.email });
           await get().refreshUserData();
         } else {
@@ -240,8 +262,10 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
 
   registerAccount: async (email, password, displayName, monthlyIncome) => {
     try {
-      await registerWithEmail(email, password, displayName);
-      await syncUserProfile(email, displayName, monthlyIncome);
+      const user = await registerWithEmail(email, password, displayName);
+      if (user.uid) {
+        await syncUserProfile(user.uid, email, displayName, monthlyIncome);
+      }
       await repo.addSystemLog(email, 'Account Created', `Registered as ${displayName}.`, 'SYSTEM');
       return null;
     } catch (error) {
@@ -252,7 +276,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   signInAccount: async (email, password) => {
     try {
       const user = await signInWithEmail(email, password);
-      await syncUserProfile(user.email!, user.displayName);
+      await syncUserProfile(user.uid, user.email!, user.displayName);
       const profile = await repo.getUserProfile(email);
       if (profile) {
         await repo.addSystemLog(email, 'Auth Success', `Signed in as ${profile.displayName}.`, 'SYSTEM');
@@ -273,11 +297,42 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
 
   updateProfile: async (displayName, income, savingsRate, alertEnabled, photoUrl = null) => {
     const email = get().currentUserEmail;
+    const uid = getFirebaseAuth().currentUser?.uid;
     if (!email) return;
-    await repo.saveUserProfile({ email, displayName, monthlyIncome: income, baseSavingsRatePercent: savingsRate, alertPreference: alertEnabled, photoUrl });
+
+    const profile: UserProfile = {
+      email,
+      displayName,
+      monthlyIncome: income,
+      baseSavingsRatePercent: savingsRate,
+      alertPreference: alertEnabled,
+      photoUrl,
+    };
+    await repo.saveUserProfile(profile);
+    if (uid) await saveCloudProfile(uid, profile);
     await updateAuthDisplayName(displayName);
+    if (photoUrl) await updateAuthPhotoUrl(photoUrl);
     await repo.addSystemLog(email, 'Profile Updated', 'Customized profile adjustments successfully stored.', 'SYSTEM');
     await get().refreshUserData();
+  },
+
+  uploadProfilePhoto: async (localUri) => {
+    const email = get().currentUserEmail;
+    const uid = getFirebaseAuth().currentUser?.uid;
+    const profile = get().userProfile;
+    if (!email || !uid || !profile) return 'Not signed in.';
+
+    try {
+      const url = await uploadCloudProfilePhoto(uid, localUri);
+      const updated: UserProfile = { ...profile, photoUrl: url };
+      await repo.saveUserProfile(updated);
+      await saveCloudProfile(uid, updated);
+      await updateAuthPhotoUrl(url);
+      await get().refreshUserData();
+      return null;
+    } catch (error) {
+      return (error as Error)?.message ?? 'Failed to upload profile photo.';
+    }
   },
 
   addExpense: async (title, amount, category, notes) => {
