@@ -1,5 +1,5 @@
 export interface Expense {
-  id: number;
+  id: string;
   userEmail: string;
   title: string;
   amount: number;
@@ -7,10 +7,13 @@ export interface Expense {
   dateMillis: number;
   notes: string;
   receiptPath?: string | null;
+  isSettled?: boolean;
+  settlementNote?: string | null;
+  settlementDateMillis?: number | null;
 }
 
 export interface Liability {
-  id: number;
+  id: string;
   userEmail: string;
   name: string;
   amount: number;
@@ -22,7 +25,7 @@ export interface Liability {
 }
 
 export interface Subscription {
-  id: number;
+  id: string;
   userEmail: string;
   name: string;
   cost: number;
@@ -34,7 +37,7 @@ export interface Subscription {
 }
 
 export interface SavingGoal {
-  id: number;
+  id: string;
   userEmail: string;
   name: string;
   targetAmount: number;
@@ -50,16 +53,16 @@ export interface SavingGoal {
 }
 
 export interface SplitGroup {
-  id: number;
+  id: string;
   userEmail: string;
   name: string;
   members: string[];
 }
 
 export interface GroupExpense {
-  id: number;
+  id: string;
   userEmail: string;
-  groupId: number;
+  groupId: string;
   title: string;
   amount: number;
   paidBy: string;
@@ -69,7 +72,7 @@ export interface GroupExpense {
 }
 
 export interface NotificationLog {
-  id: number;
+  id: string;
   userEmail: string;
   title: string;
   message: string;
@@ -121,7 +124,7 @@ export function defaultProfileExtras(): Pick<
 }
 
 export interface BudgetTemplate {
-  id: number;
+  id: string;
   userEmail: string;
   name: string;
   monthlyIncome: number;
@@ -130,7 +133,7 @@ export interface BudgetTemplate {
 }
 
 export interface CategoryBudget {
-  id: number;
+  id: string;
   userEmail: string;
   category: string;
   limitAmount: number;

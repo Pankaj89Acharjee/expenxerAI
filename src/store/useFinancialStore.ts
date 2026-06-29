@@ -1,7 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
-import * as repo from '@/src/db/repository';
-import { getDatabase } from '@/src/db/database';
 import {
   mapFirebaseAuthError,
   registerWithEmail,
@@ -11,15 +9,47 @@ import {
   updateAuthDisplayName,
   updateAuthPhotoUrl,
 } from '@/src/services/auth';
+import {
+  deleteCloudExpense,
+  fetchCloudExpenses,
+  saveCloudExpense,
+  uploadReceiptPhoto,
+} from '@/src/services/expensesCloud';
+import { isFirebaseConfigured } from '@/src/config/firebase';
 import { getFirebaseAuth } from '@/src/services/firebase';
+import { getFinancialAdvice, suggestCategory as geminiSuggestCategory } from '@/src/services/gemini';
+import { createAndPopulateGoogleSheet, sendGmailReport } from '@/src/services/googleApi';
 import {
   fetchCloudProfile,
   saveCloudProfile,
   uploadProfilePhoto as uploadCloudProfilePhoto,
 } from '@/src/services/userProfileCloud';
-import { isFirebaseConfigured } from '@/src/config/firebase';
-import { getFinancialAdvice, suggestCategory as geminiSuggestCategory } from '@/src/services/gemini';
-import { createAndPopulateGoogleSheet, sendGmailReport } from '@/src/services/googleApi';
+import {
+  addCloudLog,
+  addGroupExpense as addCloudGroupExpense,
+  addLiability as addCloudLiability,
+  addSavingGoal as addCloudSavingGoal,
+  addSubscription as addCloudSubscription,
+  addTemplate as addCloudTemplate,
+  createGroup as createCloudGroup,
+  deleteCategoryBudgetsForMonth,
+  deleteLiability as deleteCloudLiability,
+  deleteSavingGoal as deleteCloudSavingGoal,
+  deleteSubscription as deleteCloudSubscription,
+  deleteTemplate as deleteCloudTemplate,
+  fetchCategoryBudgets,
+  fetchGroupExpenses,
+  fetchGroups,
+  fetchLiabilities,
+  fetchLogs,
+  fetchSavingGoals,
+  fetchSubscriptions,
+  fetchTemplates,
+  saveCategoryBudgets,
+  updateLiability as updateCloudLiability,
+  updateSavingGoal as updateCloudSavingGoal,
+  updateSubscription as updateCloudSubscription,
+} from '@/src/services/userDataCloud';
 import type {
   BudgetTemplate,
   CategoryBudget,
@@ -44,43 +74,38 @@ const PREFS = {
 
 let authUnsubscribe: (() => void) | null = null;
 
-async function syncUserProfile(
+function currentUid(): string | null {
+  return getFirebaseAuth().currentUser?.uid ?? null;
+}
+
+async function ensureUserProfile(
   uid: string,
   email: string,
   authDisplayName?: string | null,
   monthlyIncome?: number
-): Promise<void> {
-  const firebaseName = authDisplayName?.trim();
-  const [cloud, local] = await Promise.all([
-    fetchCloudProfile(uid).catch(() => null),
-    repo.getUserProfile(email),
-  ]);
-
-  if (cloud) {
-    await repo.saveUserProfile(cloud);
-    return;
-  }
-
-  if (local) {
-    const profile = firebaseName && local.displayName !== firebaseName
-      ? { ...local, displayName: firebaseName }
-      : local;
-    await repo.saveUserProfile(profile);
-    await saveCloudProfile(uid, profile);
-    return;
+): Promise<UserProfile> {
+  const existing = await fetchCloudProfile(uid);
+  if (existing) {
+    const firebaseName = authDisplayName?.trim();
+    if (firebaseName && existing.displayName !== firebaseName) {
+      const updated = { ...existing, displayName: firebaseName };
+      await saveCloudProfile(uid, updated);
+      return updated;
+    }
+    return existing;
   }
 
   const profile: UserProfile = {
     email,
-    displayName: firebaseName || email.split('@')[0],
+    displayName: authDisplayName?.trim() || email.split('@')[0],
     photoUrl: null,
     monthlyIncome: monthlyIncome ?? 5000,
     baseSavingsRatePercent: 20,
     alertPreference: true,
     ...defaultProfileExtras(),
   };
-  await repo.saveUserProfile(profile);
   await saveCloudProfile(uid, profile);
+  return profile;
 }
 
 function clearUserState() {
@@ -96,7 +121,7 @@ function clearUserState() {
     logs: [] as NotificationLog[],
     budgetTemplates: [] as BudgetTemplate[],
     categoryBudgets: [] as CategoryBudget[],
-    selectedGroupId: null as number | null,
+    selectedGroupId: null as string | null,
   };
 }
 
@@ -113,7 +138,7 @@ interface FinancialState {
   logs: NotificationLog[];
   budgetTemplates: BudgetTemplate[];
   categoryBudgets: CategoryBudget[];
-  selectedGroupId: number | null;
+  selectedGroupId: string | null;
   aiCoachChat: ChatMessage[];
   isAiLoading: boolean;
   aiReportAdvice: string | null;
@@ -136,8 +161,15 @@ interface FinancialState {
   updateProfile: (profile: UserProfile) => Promise<void>;
   uploadProfilePhoto: (localUri: string) => Promise<string | null>;
 
-  addExpense: (title: string, amount: number, category: string, notes: string) => Promise<void>;
-  updateExpense: (expense: Expense) => Promise<void>;
+  addExpense: (
+    title: string,
+    amount: number,
+    category: string,
+    notes: string,
+    dateMillis?: number,
+    receiptLocalUri?: string | null
+  ) => Promise<string | null>;
+  updateExpense: (expense: Expense, receiptLocalUri?: string | null) => Promise<string | null>;
   deleteExpense: (expense: Expense) => Promise<void>;
   suggestCategory: (title: string, amount: number, categories: string[]) => Promise<string>;
 
@@ -152,9 +184,9 @@ interface FinancialState {
   addSavingContribution: (goal: SavingGoal, amount: number) => Promise<void>;
   deleteSavingGoal: (goal: SavingGoal) => Promise<void>;
 
-  selectGroup: (groupId: number | null) => Promise<void>;
+  selectGroup: (groupId: string | null) => Promise<void>;
   createGroup: (name: string, members: string[]) => Promise<void>;
-  addGroupExpense: (groupId: number, title: string, amount: number, paidBy: string) => Promise<void>;
+  addGroupExpense: (groupId: string, title: string, amount: number, paidBy: string) => Promise<void>;
 
   addTemplate: (name: string, monthlyIncome: number, allocations: Record<string, number>, savingsGoals: Record<string, number>) => Promise<void>;
   deleteTemplate: (template: BudgetTemplate) => Promise<void>;
@@ -194,7 +226,6 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   googleSheetsSyncUrl: '',
 
   init: async () => {
-    await getDatabase();
     const [token, lastSync, syncUrl] = await Promise.all([
       AsyncStorage.getItem(PREFS.googleToken),
       AsyncStorage.getItem(PREFS.sheetsLastSync),
@@ -217,7 +248,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       let resolved = false;
       authUnsubscribe = subscribeToAuthChanges(async (user) => {
         if (user?.email && user.uid) {
-          await syncUserProfile(user.uid, user.email, user.displayName);
+          await ensureUserProfile(user.uid, user.email, user.displayName);
           set({ currentUserEmail: user.email });
           await get().refreshUserData();
         } else {
@@ -234,31 +265,34 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
 
   refreshUserData: async () => {
     const email = get().currentUserEmail;
-    if (!email) return;
+    const uid = currentUid();
+    if (!email || !uid) return;
+
     const monthYear = currentMonthYear();
     const [profile, expenses, liabilities, subscriptions, savingGoals, groups, logs, budgetTemplates, categoryBudgets] =
       await Promise.all([
-        repo.getUserProfile(email),
-        repo.getAllExpenses(email),
-        repo.getAllLiabilities(email),
-        repo.getAllSubscriptions(email),
-        repo.getAllSavingGoals(email),
-        repo.getAllGroups(email),
-        repo.getAllLogs(email),
-        repo.getAllTemplates(email),
-        repo.getBudgetsForMonth(email, monthYear),
+        fetchCloudProfile(uid),
+        fetchCloudExpenses(uid),
+        fetchLiabilities(uid),
+        fetchSubscriptions(uid),
+        fetchSavingGoals(uid),
+        fetchGroups(uid),
+        fetchLogs(uid),
+        fetchTemplates(uid),
+        fetchCategoryBudgets(uid, monthYear),
       ]);
     set({ userProfile: profile, expenses, liabilities, subscriptions, savingGoals, groups, logs, budgetTemplates, categoryBudgets });
     await get().refreshGroupExpenses();
   },
 
   refreshGroupExpenses: async () => {
+    const uid = currentUid();
     const groupId = get().selectedGroupId;
-    if (groupId == null) {
+    if (!uid || groupId == null) {
       set({ groupExpenses: [] });
       return;
     }
-    const groupExpenses = await repo.getExpensesForGroup(groupId);
+    const groupExpenses = await fetchGroupExpenses(uid, groupId);
     set({ groupExpenses });
   },
 
@@ -266,9 +300,9 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     try {
       const user = await registerWithEmail(email, password, displayName);
       if (user.uid) {
-        await syncUserProfile(user.uid, email, displayName, monthlyIncome);
+        await ensureUserProfile(user.uid, email, displayName, monthlyIncome);
+        await addCloudLog(user.uid, email, 'Account Created', `Registered as ${displayName}.`, 'SYSTEM');
       }
-      await repo.addSystemLog(email, 'Account Created', `Registered as ${displayName}.`, 'SYSTEM');
       return null;
     } catch (error) {
       return mapFirebaseAuthError(error);
@@ -278,11 +312,8 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   signInAccount: async (email, password) => {
     try {
       const user = await signInWithEmail(email, password);
-      await syncUserProfile(user.uid, user.email!, user.displayName);
-      const profile = await repo.getUserProfile(email);
-      if (profile) {
-        await repo.addSystemLog(email, 'Auth Success', `Signed in as ${profile.displayName}.`, 'SYSTEM');
-      }
+      const profile = await ensureUserProfile(user.uid, user.email!, user.displayName);
+      await addCloudLog(user.uid, email, 'Auth Success', `Signed in as ${profile.displayName}.`, 'SYSTEM');
       return null;
     } catch (error) {
       return mapFirebaseAuthError(error);
@@ -291,35 +322,34 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
 
   logout: async () => {
     const email = get().currentUserEmail;
-    if (email) {
-      await repo.addSystemLog(email, 'Logged Out', 'Active session closed.', 'SYSTEM');
+    const uid = currentUid();
+    if (email && uid) {
+      await addCloudLog(uid, email, 'Logged Out', 'Active session closed.', 'SYSTEM');
     }
     await signOutUser();
   },
 
   updateProfile: async (profile) => {
     const email = get().currentUserEmail;
-    const uid = getFirebaseAuth().currentUser?.uid;
-    if (!email || profile.email !== email) return;
+    const uid = currentUid();
+    if (!email || !uid || profile.email !== email) return;
 
-    await repo.saveUserProfile(profile);
-    if (uid) await saveCloudProfile(uid, profile);
+    await saveCloudProfile(uid, profile);
     await updateAuthDisplayName(profile.displayName);
     if (profile.photoUrl) await updateAuthPhotoUrl(profile.photoUrl);
-    await repo.addSystemLog(email, 'Profile Updated', 'Customized profile adjustments successfully stored.', 'SYSTEM');
+    await addCloudLog(uid, email, 'Profile Updated', 'Customized profile adjustments successfully stored.', 'SYSTEM');
     await get().refreshUserData();
   },
 
   uploadProfilePhoto: async (localUri) => {
     const email = get().currentUserEmail;
-    const uid = getFirebaseAuth().currentUser?.uid;
+    const uid = currentUid();
     const profile = get().userProfile;
     if (!email || !uid || !profile) return 'Not signed in.';
 
     try {
       const url = await uploadCloudProfilePhoto(uid, localUri);
       const updated: UserProfile = { ...profile, photoUrl: url };
-      await repo.saveUserProfile(updated);
       await saveCloudProfile(uid, updated);
       await updateAuthPhotoUrl(url);
       await get().refreshUserData();
@@ -329,20 +359,71 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     }
   },
 
-  addExpense: async (title, amount, category, notes) => {
+  addExpense: async (title, amount, category, notes, dateMillis, receiptLocalUri) => {
     const email = get().currentUserEmail;
-    if (!email) return;
-    await repo.addExpense({ userEmail: email, title, amount, category, dateMillis: Date.now(), notes });
-    await get().refreshUserData();
+    const uid = currentUid();
+    if (!email || !uid) return 'Not signed in.';
+
+    try {
+      const expenseDate = dateMillis ?? Date.now();
+      const expenseId = await saveCloudExpense(uid, {
+        userEmail: email,
+        title,
+        amount,
+        category,
+        dateMillis: expenseDate,
+        notes,
+        receiptPath: null,
+      });
+
+      if (receiptLocalUri) {
+        const receiptPath = await uploadReceiptPhoto(uid, expenseId, receiptLocalUri);
+        await saveCloudExpense(
+          uid,
+          {
+            userEmail: email,
+            title,
+            amount,
+            category,
+            dateMillis: expenseDate,
+            notes,
+            receiptPath,
+          },
+          expenseId
+        );
+      }
+
+      await addCloudLog(uid, email, 'Expense Logged', `Logged expense of ₹${amount} for '${title}'`, 'SYSTEM');
+      await get().refreshUserData();
+      return null;
+    } catch (error) {
+      return (error as Error)?.message ?? 'Failed to save expense.';
+    }
   },
 
-  updateExpense: async (expense) => {
-    await repo.updateExpense(expense);
-    await get().refreshUserData();
+  updateExpense: async (expense, receiptLocalUri) => {
+    const uid = currentUid();
+    if (!uid) return 'Not signed in.';
+
+    try {
+      let receiptPath = expense.receiptPath ?? null;
+      if (receiptLocalUri) {
+        receiptPath = await uploadReceiptPhoto(uid, expense.id, receiptLocalUri);
+      }
+
+      const { id, ...data } = { ...expense, receiptPath };
+      await saveCloudExpense(uid, data, id);
+      await get().refreshUserData();
+      return null;
+    } catch (error) {
+      return (error as Error)?.message ?? 'Failed to update expense.';
+    }
   },
 
   deleteExpense: async (expense) => {
-    await repo.deleteExpense(expense);
+    const uid = currentUid();
+    if (!uid) return;
+    await deleteCloudExpense(uid, expense.id);
     await get().refreshUserData();
   },
 
@@ -350,8 +431,9 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
 
   addLiability: async (name, amount, frequency, category, dueInDays) => {
     const email = get().currentUserEmail;
-    if (!email) return;
-    await repo.addLiability({
+    const uid = currentUid();
+    if (!email || !uid) return;
+    await addCloudLiability(uid, {
       userEmail: email,
       name,
       amount,
@@ -361,23 +443,29 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       isPaid: false,
       autoRecalculate: true,
     });
+    await addCloudLog(uid, email, 'Liability Created', `New ${frequency.toLowerCase()} liability '${name}' set for ₹${amount}.`, 'LIABILITY');
     await get().refreshUserData();
   },
 
   toggleLiabilityPaid: async (liability) => {
-    await repo.updateLiability({ ...liability, isPaid: !liability.isPaid });
+    const uid = currentUid();
+    if (!uid) return;
+    await updateCloudLiability(uid, { ...liability, isPaid: !liability.isPaid });
     await get().refreshUserData();
   },
 
   deleteLiability: async (liability) => {
-    await repo.deleteLiability(liability);
+    const uid = currentUid();
+    if (!uid) return;
+    await deleteCloudLiability(uid, liability.id);
     await get().refreshUserData();
   },
 
   addSubscription: async (name, cost, cycle, category) => {
     const email = get().currentUserEmail;
-    if (!email) return;
-    await repo.addSubscription({
+    const uid = currentUid();
+    if (!email || !uid) return;
+    await addCloudSubscription(uid, {
       userEmail: email,
       name,
       cost,
@@ -386,27 +474,36 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       category,
       isAlertEnabled: true,
     });
+    await addCloudLog(uid, email, 'Subscription Tracked', `Subscribed to '${name}' for ₹${cost}/month.`, 'SUBSCRIPTION');
     await get().refreshUserData();
   },
 
   toggleSubscriptionAlert: async (sub) => {
-    await repo.updateSubscription({ ...sub, isAlertEnabled: !sub.isAlertEnabled });
+    const uid = currentUid();
+    if (!uid) return;
+    await updateCloudSubscription(uid, { ...sub, isAlertEnabled: !sub.isAlertEnabled });
     await get().refreshUserData();
   },
 
   deleteSubscription: async (sub) => {
-    await repo.deleteSubscription(sub);
+    const uid = currentUid();
+    if (!uid) return;
+    await deleteCloudSubscription(uid, sub.id);
     await get().refreshUserData();
   },
 
   addSavingContribution: async (goal, amount) => {
-    await repo.updateSavingGoal({ ...goal, savedAmount: goal.savedAmount + amount });
-    await repo.addSystemLog(goal.userEmail, 'Goal Contributed', `Contributed ₹${amount} to target goal: '${goal.name}'`, 'SYSTEM');
+    const uid = currentUid();
+    if (!uid) return;
+    await updateCloudSavingGoal(uid, { ...goal, savedAmount: goal.savedAmount + amount });
+    await addCloudLog(uid, goal.userEmail, 'Goal Contributed', `Contributed ₹${amount} to target goal: '${goal.name}'`, 'SYSTEM');
     await get().refreshUserData();
   },
 
   deleteSavingGoal: async (goal) => {
-    await repo.deleteSavingGoal(goal);
+    const uid = currentUid();
+    if (!uid) return;
+    await deleteCloudSavingGoal(uid, goal.id);
     await get().refreshUserData();
   },
 
@@ -417,15 +514,18 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
 
   createGroup: async (name, members) => {
     const email = get().currentUserEmail;
-    if (!email) return;
-    await repo.createGroup({ userEmail: email, name, members });
+    const uid = currentUid();
+    if (!email || !uid) return;
+    await createCloudGroup(uid, { userEmail: email, name, members });
+    await addCloudLog(uid, email, 'Group Created', `Split group '${name}' created with ${members.length} members.`, 'SYSTEM');
     await get().refreshUserData();
   },
 
   addGroupExpense: async (groupId, title, amount, paidBy) => {
     const email = get().currentUserEmail;
-    if (!email) return;
-    await repo.addGroupExpense({
+    const uid = currentUid();
+    if (!email || !uid) return;
+    await addCloudGroupExpense(uid, {
       userEmail: email,
       groupId,
       title,
@@ -435,28 +535,39 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       splitsJson: '{}',
       dateMillis: Date.now(),
     });
+    await addCloudLog(uid, email, 'Split Expense', `Split expense '${title}' for ₹${amount} added to group.`, 'SYSTEM');
     await get().refreshGroupExpenses();
     await get().refreshUserData();
   },
 
   addTemplate: async (name, monthlyIncome, allocations, savingsGoals) => {
     const email = get().currentUserEmail;
-    if (!email) return;
-    const allocationsJson = JSON.stringify(allocations);
-    const savingsGoalsJson = JSON.stringify(savingsGoals);
-    await repo.addTemplate({ userEmail: email, name, monthlyIncome, allocationsJson, savingsGoalsJson });
+    const uid = currentUid();
+    if (!email || !uid) return;
+    await addCloudTemplate(uid, {
+      userEmail: email,
+      name,
+      monthlyIncome,
+      allocationsJson: JSON.stringify(allocations),
+      savingsGoalsJson: JSON.stringify(savingsGoals),
+    });
+    await addCloudLog(uid, email, 'Template Saved', `Budget template '${name}' successfully defined.`, 'SYSTEM');
     await get().refreshUserData();
   },
 
   deleteTemplate: async (template) => {
-    await repo.deleteTemplate(template);
+    const uid = currentUid();
+    if (!uid) return;
+    await deleteCloudTemplate(uid, template.id);
     await get().refreshUserData();
   },
 
   applyTemplate: async (template, monthYear) => {
     const email = get().currentUserEmail;
-    if (!email) return;
-    await repo.deleteBudgetsForMonth(email, monthYear);
+    const uid = currentUid();
+    if (!email || !uid) return;
+
+    await deleteCategoryBudgetsForMonth(uid, email, monthYear);
     const allocationsMap = parseJsonToMap(template.allocationsJson);
     const budgets = Object.entries(allocationsMap).map(([category, limitAmount]) => ({
       userEmail: email,
@@ -464,13 +575,13 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       limitAmount,
       monthYear,
     }));
-    if (budgets.length) await repo.saveCategoryBudgets(budgets);
+    if (budgets.length) await saveCategoryBudgets(uid, budgets);
 
-    const profile = await repo.getUserProfile(email);
+    const profile = get().userProfile ?? (await fetchCloudProfile(uid));
     if (profile) {
-      await repo.saveUserProfile({ ...profile, monthlyIncome: template.monthlyIncome });
+      await saveCloudProfile(uid, { ...profile, monthlyIncome: template.monthlyIncome });
     } else {
-      await repo.saveUserProfile({
+      await saveCloudProfile(uid, {
         email,
         displayName: 'User',
         monthlyIncome: template.monthlyIncome,
@@ -485,12 +596,12 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     for (const [goalName, amountToSave] of Object.entries(savingsGoalsMap)) {
       const matched = existingGoals.find((g) => g.name.toLowerCase() === goalName.toLowerCase());
       if (matched) {
-        await repo.updateSavingGoal({ ...matched, savedAmount: matched.savedAmount + amountToSave });
-        await repo.addSystemLog(email, 'Goal Allocated', `Template applied ₹${amountToSave} to existing goal '${matched.name}'.`, 'SYSTEM');
+        await updateCloudSavingGoal(uid, { ...matched, savedAmount: matched.savedAmount + amountToSave });
+        await addCloudLog(uid, email, 'Goal Allocated', `Template applied ₹${amountToSave} to existing goal '${matched.name}'.`, 'SYSTEM');
       } else {
         const targetDate = Date.now() + 365 * 86400000;
         const initialContrib = amountToSave / 12;
-        await repo.addSavingGoal({
+        await addCloudSavingGoal(uid, {
           userEmail: email,
           name: goalName,
           targetAmount: amountToSave * 12,
@@ -506,7 +617,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
         });
       }
     }
-    await repo.addSystemLog(email, 'Template Applied', `Successfully applied budget template '${template.name}' to ${monthYear}. Income set to ₹${template.monthlyIncome}.`, 'SYSTEM');
+    await addCloudLog(uid, email, 'Template Applied', `Successfully applied budget template '${template.name}' to ${monthYear}. Income set to ₹${template.monthlyIncome}.`, 'SYSTEM');
     await get().refreshUserData();
   },
 
@@ -547,7 +658,8 @@ Analyse this context and respond directly to their query with actionable FinTech
 
   triggerGoogleSheetsSync: async (customToken) => {
     const email = get().currentUserEmail;
-    if (!email) return { success: false, error: 'Not logged in' };
+    const uid = currentUid();
+    if (!email || !uid) return { success: false, error: 'Not logged in' };
 
     const token = customToken?.trim() || get().googleOAuthToken;
     const headers = ['Type', 'Name/Title', 'Amount', 'Category', 'Date/DueDate', 'Details/Notes'];
@@ -565,7 +677,7 @@ Analyse this context and respond directly to their query with actionable FinTech
       await AsyncStorage.setItem(PREFS.sheetsLastSync, String(now));
       await AsyncStorage.setItem(PREFS.sheetsSyncUrl, mockUrl);
       set({ googleSheetsLastSync: now, googleSheetsSyncUrl: mockUrl });
-      await repo.addSystemLog(email, 'Sheets Cloud Sync', `Sandbox Sync: Created Live Google Sheet 'FutureFund_Ledger_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}'. Automated periodic sync set for 7 days.`, 'SYSTEM');
+      await addCloudLog(uid, email, 'Sheets Cloud Sync', `Sandbox Sync: Created Live Google Sheet 'FutureFund_Ledger_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}'. Automated periodic sync set for 7 days.`, 'SYSTEM');
       await get().refreshUserData();
       return { success: true, url: mockUrl };
     }
@@ -577,18 +689,19 @@ Analyse this context and respond directly to their query with actionable FinTech
       await AsyncStorage.setItem(PREFS.sheetsLastSync, String(now));
       await AsyncStorage.setItem(PREFS.sheetsSyncUrl, url);
       set({ googleSheetsLastSync: now, googleSheetsSyncUrl: url });
-      await repo.addSystemLog(email, 'Google Sheets Sync Success', `Live Google Sheet updated! URL: ${url}. Periodic sync scheduled every 7 days.`, 'SYSTEM');
+      await addCloudLog(uid, email, 'Google Sheets Sync Success', `Live Google Sheet updated! URL: ${url}. Periodic sync scheduled every 7 days.`, 'SYSTEM');
       await get().refreshUserData();
       return { success: true, url };
     }
-    await repo.addSystemLog(email, 'Google Sheets Sync Error', `Sync error: ${error}`, 'SYSTEM');
+    await addCloudLog(uid, email, 'Google Sheets Sync Error', `Sync error: ${error}`, 'SYSTEM');
     await get().refreshUserData();
     return { success: false, error: error ?? undefined };
   },
 
   triggerGmailDelivery: async (customToken, customToEmail) => {
     const email = get().currentUserEmail;
-    if (!email) return { success: false, error: 'Not logged in' };
+    const uid = currentUid();
+    if (!email || !uid) return { success: false, error: 'Not logged in' };
 
     const token = customToken?.trim() || get().googleOAuthToken;
     const { userProfile, expenses, liabilities, savingGoals, aiReportAdvice } = get();
@@ -623,18 +736,18 @@ Analyse this context and respond directly to their query with actionable FinTech
 
     if (!token || token === 'MOCK_TOKEN' || token.length < 10) {
       await new Promise((r) => setTimeout(r, 1200));
-      await repo.addSystemLog(email, 'Gmail Delivery Sent', `Sandbox Mail: Monthly PDF report compiled for delivery to: ${recipient}.`, 'SYSTEM');
+      await addCloudLog(uid, email, 'Gmail Delivery Sent', `Sandbox Mail: Monthly PDF report compiled for delivery to: ${recipient}.`, 'SYSTEM');
       await get().refreshUserData();
       return { success: true };
     }
 
     const [success, error] = await sendGmailReport(token, recipient, subject, htmlContent);
     if (success) {
-      await repo.addSystemLog(email, 'Gmail Delivery Sent', `Real Gmail report successfully dispatched to ${recipient}.`, 'SYSTEM');
+      await addCloudLog(uid, email, 'Gmail Delivery Sent', `Real Gmail report successfully dispatched to ${recipient}.`, 'SYSTEM');
       await get().refreshUserData();
       return { success: true };
     }
-    await repo.addSystemLog(email, 'Gmail Delivery Error', `Gmail send error: ${error}`, 'SYSTEM');
+    await addCloudLog(uid, email, 'Gmail Delivery Error', `Gmail send error: ${error}`, 'SYSTEM');
     await get().refreshUserData();
     return { success: false, error: error ?? undefined };
   },

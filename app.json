@@ -36,11 +36,11 @@
           }
         }
       ],
-      "expo-sqlite",
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow Expenxer to access your photos for your profile picture."
+          "photosPermission": "Allow Expenxer to access your photos for your profile picture.",
+          "cameraPermission": "Allow Expenxer to capture receipt photos for your expenses."
         }
       ],
       [
@@ -56,7 +56,8 @@
           "resizeMode": "contain",
           "backgroundColor": "#ffffff"
         }
-      ]
+      ],
+      "@react-native-community/datetimepicker"
     ],
     "experiments": {
       "typedRoutes": true
