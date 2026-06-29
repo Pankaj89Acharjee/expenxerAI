@@ -146,7 +146,30 @@ export interface DebtFlow {
   amount: number;
 }
 
+export interface ChatAttachment {
+  id: string;
+  uri: string;
+  mimeType: string;
+  name: string;
+  storageUrl?: string | null;
+}
+
 export interface ChatMessage {
+  id: string;
   text: string;
   isUser: boolean;
+  timestampMillis: number;
+  sessionId: string;
+  attachments?: ChatAttachment[];
 }
+
+export interface ChatSession {
+  id: string;
+  userEmail: string;
+  title: string;
+  createdAtMillis: number;
+  lastMessageAtMillis: number;
+}
+
+export const ADVISOR_WELCOME_TEXT =
+  'Hello! I am your Expenxer Advisor. I have full context of your expenses, budgets, liabilities, and splits. How may I help you?';

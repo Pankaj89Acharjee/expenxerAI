@@ -17,7 +17,19 @@ import {
 } from '@/src/services/expensesCloud';
 import { isFirebaseConfigured } from '@/src/config/firebase';
 import { getFirebaseAuth } from '@/src/services/firebase';
-import { getFinancialAdvice, suggestCategory as geminiSuggestCategory } from '@/src/services/gemini';
+import { getFinancialAdviceWithHistory, suggestCategory as geminiSuggestCategory, transcribeAudio } from '@/src/services/gemini';
+import {
+  clearChatMessages,
+  createChatSession,
+  deleteChatSession,
+  fetchAllGroupExpenses,
+  fetchChatMessages,
+  fetchChatSessions,
+  saveChatMessage,
+  updateChatSessionTitle,
+  uploadChatAttachment,
+} from '@/src/services/chatCloud';
+import { buildAdvisorSystemPrompt } from '@/src/utils/advisorContext';
 import { createAndPopulateGoogleSheet, sendGmailReport } from '@/src/services/googleApi';
 import {
   fetchCloudProfile,
@@ -53,7 +65,9 @@ import {
 import type {
   BudgetTemplate,
   CategoryBudget,
+  ChatAttachment,
   ChatMessage,
+  ChatSession,
   Expense,
   GroupExpense,
   Liability,
@@ -63,6 +77,7 @@ import type {
   Subscription,
   UserProfile,
 } from '@/src/types/models';
+import { ADVISOR_WELCOME_TEXT } from '@/src/types/models';
 import { defaultProfileExtras } from '@/src/types/models';
 import { currentMonthYear, parseJsonToMap } from '@/src/utils/format';
 
@@ -118,10 +133,26 @@ function clearUserState() {
     savingGoals: [] as SavingGoal[],
     groups: [] as SplitGroup[],
     groupExpenses: [] as GroupExpense[],
+    allGroupExpenses: [] as GroupExpense[],
     logs: [] as NotificationLog[],
     budgetTemplates: [] as BudgetTemplate[],
     categoryBudgets: [] as CategoryBudget[],
     selectedGroupId: null as string | null,
+    chatSessions: [] as ChatSession[],
+    activeChatSessionId: null as string | null,
+    aiCoachChat: [] as ChatMessage[],
+    isAiLoading: false,
+    aiReportAdvice: null as string | null,
+  };
+}
+
+function welcomeMessage(sessionId: string): ChatMessage {
+  return {
+    id: 'welcome',
+    sessionId,
+    text: ADVISOR_WELCOME_TEXT,
+    isUser: false,
+    timestampMillis: Date.now(),
   };
 }
 
@@ -139,6 +170,9 @@ interface FinancialState {
   budgetTemplates: BudgetTemplate[];
   categoryBudgets: CategoryBudget[];
   selectedGroupId: string | null;
+  allGroupExpenses: GroupExpense[];
+  chatSessions: ChatSession[];
+  activeChatSessionId: string | null;
   aiCoachChat: ChatMessage[];
   isAiLoading: boolean;
   aiReportAdvice: string | null;
@@ -192,7 +226,13 @@ interface FinancialState {
   deleteTemplate: (template: BudgetTemplate) => Promise<void>;
   applyTemplate: (template: BudgetTemplate, monthYear: string) => Promise<void>;
 
-  sendChatMessage: (message: string) => Promise<void>;
+  sendChatMessage: (message: string, attachments?: Omit<ChatAttachment, 'id' | 'storageUrl'>[]) => Promise<void>;
+  refreshChat: () => Promise<void>;
+  createNewChatSession: () => Promise<void>;
+  selectChatSession: (sessionId: string) => Promise<void>;
+  deleteChatSessionById: (sessionId: string) => Promise<void>;
+  clearCurrentChat: () => Promise<void>;
+  transcribeVoiceNote: (localUri: string, mimeType: string) => Promise<string>;
   saveGoogleOAuthToken: (token: string) => Promise<void>;
   triggerGoogleSheetsSync: (customToken?: string) => Promise<{ success: boolean; url?: string; error?: string }>;
   triggerGmailDelivery: (customToken?: string, customToEmail?: string) => Promise<{ success: boolean; error?: string }>;
@@ -213,12 +253,10 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   budgetTemplates: [],
   categoryBudgets: [],
   selectedGroupId: null,
-  aiCoachChat: [
-    {
-      text: 'Hello! I am your Expenxer Advisor. How may I help you?',
-      isUser: false,
-    },
-  ],
+  allGroupExpenses: [],
+  chatSessions: [],
+  activeChatSessionId: null,
+  aiCoachChat: [],
   isAiLoading: false,
   aiReportAdvice: null,
   googleOAuthToken: '',
@@ -269,7 +307,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     if (!email || !uid) return;
 
     const monthYear = currentMonthYear();
-    const [profile, expenses, liabilities, subscriptions, savingGoals, groups, logs, budgetTemplates, categoryBudgets] =
+    const [profile, expenses, liabilities, subscriptions, savingGoals, groups, logs, budgetTemplates, categoryBudgets, allGroupExpenses] =
       await Promise.all([
         fetchCloudProfile(uid),
         fetchCloudExpenses(uid),
@@ -280,9 +318,11 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
         fetchLogs(uid),
         fetchTemplates(uid),
         fetchCategoryBudgets(uid, monthYear),
+        fetchAllGroupExpenses(uid),
       ]);
-    set({ userProfile: profile, expenses, liabilities, subscriptions, savingGoals, groups, logs, budgetTemplates, categoryBudgets });
+    set({ userProfile: profile, expenses, liabilities, subscriptions, savingGoals, groups, logs, budgetTemplates, categoryBudgets, allGroupExpenses });
     await get().refreshGroupExpenses();
+    await get().refreshChat();
   },
 
   refreshGroupExpenses: async () => {
@@ -621,34 +661,180 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     await get().refreshUserData();
   },
 
-  sendChatMessage: async (message) => {
-    if (!message.trim()) return;
+  refreshChat: async () => {
+    const uid = currentUid();
     const email = get().currentUserEmail;
-    if (!email) return;
+    if (!uid || !email) return;
 
-    set((s) => ({ aiCoachChat: [...s.aiCoachChat, { text: message, isUser: true }], isAiLoading: true }));
+    let sessions = await fetchChatSessions(uid);
+    let activeId = get().activeChatSessionId;
 
-    const { userProfile, expenses, liabilities, subscriptions, savingGoals } = get();
-    const userIncome = userProfile?.monthlyIncome ?? 5000;
-    const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
-    const liabilityText = liabilities.map((l) => `${l.name}(₹${l.amount})`).join(', ');
-    const subText = subscriptions.map((s) => `${s.name}(₹${s.cost}/mo)`).join(', ');
-    const goalsText = savingGoals.map((g) => `${g.name}(target ₹${g.targetAmount}, saved ₹${g.savedAmount}, monthly rate: ₹${g.currentRequiredMonthly})`).join(', ');
+    if (!sessions.length) {
+      const session = await createChatSession(uid, email, 'New chat');
+      const welcome = welcomeMessage(session.id);
+      await saveChatMessage(uid, welcome);
+      sessions = [session];
+      activeId = session.id;
+    } else if (!activeId || !sessions.some((s) => s.id === activeId)) {
+      activeId = sessions[0].id;
+    }
 
-    const systemPrompt = `You are the Expenxer AI Advisor and Expert. Keep responses focused, clear, precise and highly professional.
-Here is the user's active financial sheet:
-- Monthly Income: ₹${userIncome}
-- General Expenses logged: ₹${totalExpenses}
-- Annual liabilities: ${liabilityText}
-- Monthly subscription plans: ${subText}
-- Savings goals: ${goalsText}
-Analyse this context and respond directly to their query with actionable FinTech intelligence and cost reduction ideas.`;
+    const messages = await fetchChatMessages(uid, activeId!);
+    set({
+      chatSessions: sessions,
+      activeChatSessionId: activeId,
+      aiCoachChat: messages.length ? messages : [welcomeMessage(activeId!)],
+    });
+  },
 
-    const aiResponse = await getFinancialAdvice(message, systemPrompt);
-    set((s) => ({
-      aiCoachChat: [...s.aiCoachChat, { text: aiResponse, isUser: false }],
-      isAiLoading: false,
+  createNewChatSession: async () => {
+    const uid = currentUid();
+    const email = get().currentUserEmail;
+    if (!uid || !email) return;
+
+    const session = await createChatSession(uid, email, 'New chat');
+    const welcome = welcomeMessage(session.id);
+    await saveChatMessage(uid, welcome);
+    const sessions = await fetchChatSessions(uid);
+    set({
+      chatSessions: sessions,
+      activeChatSessionId: session.id,
+      aiCoachChat: [welcome],
+    });
+  },
+
+  selectChatSession: async (sessionId) => {
+    const uid = currentUid();
+    if (!uid) return;
+    const messages = await fetchChatMessages(uid, sessionId);
+    set({
+      activeChatSessionId: sessionId,
+      aiCoachChat: messages.length ? messages : [welcomeMessage(sessionId)],
+    });
+  },
+
+  deleteChatSessionById: async (sessionId) => {
+    const uid = currentUid();
+    if (!uid) return;
+    await deleteChatSession(uid, sessionId);
+    const remaining = (await fetchChatSessions(uid)).filter((s) => s.id !== sessionId);
+    if (get().activeChatSessionId === sessionId) {
+      if (remaining.length) {
+        await get().selectChatSession(remaining[0].id);
+      } else {
+        await get().createNewChatSession();
+      }
+    }
+    set({ chatSessions: await fetchChatSessions(uid) });
+  },
+
+  clearCurrentChat: async () => {
+    const uid = currentUid();
+    const sessionId = get().activeChatSessionId;
+    if (!uid || !sessionId) return;
+    await clearChatMessages(uid, sessionId);
+    const welcome = welcomeMessage(sessionId);
+    await saveChatMessage(uid, welcome);
+    set({ aiCoachChat: [welcome] });
+  },
+
+  transcribeVoiceNote: transcribeAudio,
+
+  sendChatMessage: async (message, rawAttachments = []) => {
+    if (!message.trim() && !rawAttachments.length) return;
+    const email = get().currentUserEmail;
+    const uid = currentUid();
+    if (!email || !uid) return;
+
+    let sessionId = get().activeChatSessionId;
+    if (!sessionId) {
+      await get().refreshChat();
+      sessionId = get().activeChatSessionId;
+      if (!sessionId) return;
+    }
+
+    const now = Date.now();
+    const pendingAttachments: ChatAttachment[] = rawAttachments.map((a, i) => ({
+      id: `att_${now}_${i}`,
+      uri: a.uri,
+      mimeType: a.mimeType,
+      name: a.name,
     }));
+
+    const userMsg: ChatMessage = {
+      id: `local_${now}`,
+      sessionId,
+      text: message.trim(),
+      isUser: true,
+      timestampMillis: now,
+      attachments: pendingAttachments.length ? pendingAttachments : undefined,
+    };
+
+    set((s) => ({ aiCoachChat: [...s.aiCoachChat, userMsg], isAiLoading: true }));
+
+    const savedUserId = await saveChatMessage(uid, userMsg);
+    userMsg.id = savedUserId;
+
+    if (pendingAttachments.length) {
+      const uploaded: ChatAttachment[] = [];
+      for (const att of pendingAttachments) {
+        try {
+          const storageUrl = await uploadChatAttachment(uid, sessionId, savedUserId, att.uri, att.mimeType, att.name);
+          uploaded.push({ ...att, storageUrl });
+        } catch {
+          uploaded.push(att);
+        }
+      }
+      userMsg.attachments = uploaded;
+      await saveChatMessage(uid, userMsg, savedUserId);
+      set((s) => ({
+        aiCoachChat: s.aiCoachChat.map((m) => (m.id === savedUserId || m.id === `local_${now}` ? userMsg : m)),
+      }));
+    }
+
+    const isFirstUserMsg = get().aiCoachChat.filter((m) => m.isUser).length === 1;
+    if (isFirstUserMsg && message.trim()) {
+      const title = message.trim().slice(0, 40) + (message.trim().length > 40 ? '…' : '');
+      await updateChatSessionTitle(uid, sessionId, title);
+      set({ chatSessions: await fetchChatSessions(uid) });
+    }
+
+    const state = get();
+    const systemPrompt = buildAdvisorSystemPrompt({
+      userProfile: state.userProfile,
+      expenses: state.expenses,
+      liabilities: state.liabilities,
+      subscriptions: state.subscriptions,
+      savingGoals: state.savingGoals,
+      categoryBudgets: state.categoryBudgets,
+      budgetTemplates: state.budgetTemplates,
+      groups: state.groups,
+      groupExpenses: state.allGroupExpenses,
+    });
+
+    const history = get().aiCoachChat.filter((m) => m.id !== savedUserId);
+    const aiResponse = await getFinancialAdviceWithHistory(
+      history,
+      message.trim() || 'Please analyse the attached file(s) in context of my finances.',
+      systemPrompt,
+      userMsg.attachments
+    );
+
+    const botMsg: ChatMessage = {
+      id: `bot_${Date.now()}`,
+      sessionId,
+      text: aiResponse,
+      isUser: false,
+      timestampMillis: Date.now(),
+    };
+    botMsg.id = await saveChatMessage(uid, botMsg);
+
+    set((s) => ({
+      aiCoachChat: [...s.aiCoachChat, botMsg],
+      isAiLoading: false,
+      aiReportAdvice: aiResponse,
+    }));
+    set({ chatSessions: await fetchChatSessions(uid) });
   },
 
   saveGoogleOAuthToken: async (token) => {

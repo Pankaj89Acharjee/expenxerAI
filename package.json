@@ -8,6 +8,7 @@
     "@react-native-community/datetimepicker": "9.1.0",
     "@react-native-community/slider": "5.2.0",
     "expo": "~56.0.12",
+    "expo-audio": "~56.0.12",
     "expo-constants": "~56.0.18",
     "expo-file-system": "^56.0.8",
     "expo-font": "~56.0.7",
