@@ -30,6 +30,7 @@ import {
   uploadChatAttachment,
 } from '@/src/services/chatCloud';
 import { buildAdvisorSystemPrompt } from '@/src/utils/advisorContext';
+import { buildSchedule, serializeInstallments } from '@/src/utils/liabilitySchedule';
 import { createAndPopulateGoogleSheet, sendGmailReport } from '@/src/services/googleApi';
 import {
   fetchCloudProfile,
@@ -37,6 +38,7 @@ import {
   uploadProfilePhoto as uploadCloudProfilePhoto,
 } from '@/src/services/userProfileCloud';
 import {
+  addBill as addCloudBill,
   addCloudLog,
   addGroupExpense as addCloudGroupExpense,
   addLiability as addCloudLiability,
@@ -44,11 +46,13 @@ import {
   addSubscription as addCloudSubscription,
   addTemplate as addCloudTemplate,
   createGroup as createCloudGroup,
+  deleteBill as deleteCloudBill,
   deleteCategoryBudgetsForMonth,
   deleteLiability as deleteCloudLiability,
   deleteSavingGoal as deleteCloudSavingGoal,
   deleteSubscription as deleteCloudSubscription,
   deleteTemplate as deleteCloudTemplate,
+  fetchBills,
   fetchCategoryBudgets,
   fetchGroupExpenses,
   fetchGroups,
@@ -58,12 +62,14 @@ import {
   fetchSubscriptions,
   fetchTemplates,
   saveCategoryBudgets,
+  updateBill as updateCloudBill,
   updateLiability as updateCloudLiability,
   updateSavingGoal as updateCloudSavingGoal,
   updateSubscription as updateCloudSubscription,
 } from '@/src/services/userDataCloud';
 import type {
   BudgetTemplate,
+  Bill,
   CategoryBudget,
   ChatAttachment,
   ChatMessage,
@@ -130,6 +136,7 @@ function clearUserState() {
     expenses: [] as Expense[],
     liabilities: [] as Liability[],
     subscriptions: [] as Subscription[],
+    bills: [] as Bill[],
     savingGoals: [] as SavingGoal[],
     groups: [] as SplitGroup[],
     groupExpenses: [] as GroupExpense[],
@@ -163,6 +170,7 @@ interface FinancialState {
   expenses: Expense[];
   liabilities: Liability[];
   subscriptions: Subscription[];
+  bills: Bill[];
   savingGoals: SavingGoal[];
   groups: SplitGroup[];
   groupExpenses: GroupExpense[];
@@ -207,13 +215,27 @@ interface FinancialState {
   deleteExpense: (expense: Expense) => Promise<void>;
   suggestCategory: (title: string, amount: number, categories: string[]) => Promise<string>;
 
-  addLiability: (name: string, amount: number, frequency: string, category: string, dueInDays: number) => Promise<void>;
-  toggleLiabilityPaid: (liability: Liability) => Promise<void>;
+  addLiability: (name: string, amount: number, frequency: string, dueDateMillis: number) => Promise<void>;
+  updateLiability: (liability: Liability) => Promise<void>;
   deleteLiability: (liability: Liability) => Promise<void>;
 
-  addSubscription: (name: string, cost: number, cycle: string, category: string) => Promise<void>;
+  addSubscription: (
+    name: string,
+    cost: number,
+    cycle: string,
+    category: string,
+    isAlertEnabled?: boolean
+  ) => Promise<void>;
+  updateSubscription: (sub: Subscription) => Promise<void>;
   toggleSubscriptionAlert: (sub: Subscription) => Promise<void>;
+  stopSubscription: (sub: Subscription) => Promise<void>;
   deleteSubscription: (sub: Subscription) => Promise<void>;
+
+  addBill: (name: string, amount: number, cycle: string, category: string, isAlertEnabled?: boolean) => Promise<void>;
+  updateBill: (bill: Bill) => Promise<void>;
+  toggleBillAlert: (bill: Bill) => Promise<void>;
+  stopBill: (bill: Bill) => Promise<void>;
+  deleteBill: (bill: Bill) => Promise<void>;
 
   addSavingContribution: (goal: SavingGoal, amount: number) => Promise<void>;
   deleteSavingGoal: (goal: SavingGoal) => Promise<void>;
@@ -246,6 +268,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   expenses: [],
   liabilities: [],
   subscriptions: [],
+  bills: [],
   savingGoals: [],
   groups: [],
   groupExpenses: [],
@@ -307,12 +330,13 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     if (!email || !uid) return;
 
     const monthYear = currentMonthYear();
-    const [profile, expenses, liabilities, subscriptions, savingGoals, groups, logs, budgetTemplates, categoryBudgets, allGroupExpenses] =
+    const [profile, expenses, liabilities, subscriptions, bills, savingGoals, groups, logs, budgetTemplates, categoryBudgets, allGroupExpenses] =
       await Promise.all([
         fetchCloudProfile(uid),
         fetchCloudExpenses(uid),
         fetchLiabilities(uid),
         fetchSubscriptions(uid),
+        fetchBills(uid),
         fetchSavingGoals(uid),
         fetchGroups(uid),
         fetchLogs(uid),
@@ -320,7 +344,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
         fetchCategoryBudgets(uid, monthYear),
         fetchAllGroupExpenses(uid),
       ]);
-    set({ userProfile: profile, expenses, liabilities, subscriptions, savingGoals, groups, logs, budgetTemplates, categoryBudgets, allGroupExpenses });
+    set({ userProfile: profile, expenses, liabilities, subscriptions, bills, savingGoals, groups, logs, budgetTemplates, categoryBudgets, allGroupExpenses });
     await get().refreshGroupExpenses();
     await get().refreshChat();
   },
@@ -469,28 +493,29 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
 
   suggestCategory: geminiSuggestCategory,
 
-  addLiability: async (name, amount, frequency, category, dueInDays) => {
+  addLiability: async (name, amount, frequency, dueDateMillis) => {
     const email = get().currentUserEmail;
     const uid = currentUid();
     if (!email || !uid) return;
+    const schedule = buildSchedule(amount, frequency, dueDateMillis);
     await addCloudLiability(uid, {
       userEmail: email,
       name,
       amount,
       frequency,
-      category,
-      dueDateMillis: Date.now() + dueInDays * 86400000,
+      dueDateMillis,
       isPaid: false,
       autoRecalculate: true,
+      paymentScheduleJson: serializeInstallments(schedule),
     });
     await addCloudLog(uid, email, 'Liability Created', `New ${frequency.toLowerCase()} liability '${name}' set for ₹${amount}.`, 'LIABILITY');
     await get().refreshUserData();
   },
 
-  toggleLiabilityPaid: async (liability) => {
+  updateLiability: async (liability) => {
     const uid = currentUid();
     if (!uid) return;
-    await updateCloudLiability(uid, { ...liability, isPaid: !liability.isPaid });
+    await updateCloudLiability(uid, liability);
     await get().refreshUserData();
   },
 
@@ -501,7 +526,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     await get().refreshUserData();
   },
 
-  addSubscription: async (name, cost, cycle, category) => {
+  addSubscription: async (name, cost, cycle, category, isAlertEnabled = true) => {
     const email = get().currentUserEmail;
     const uid = currentUid();
     if (!email || !uid) return;
@@ -512,9 +537,17 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       billingCycle: cycle,
       nextPaymentMillis: Date.now() + 86400000 * 30,
       category,
-      isAlertEnabled: true,
+      isAlertEnabled,
+      isActive: true,
     });
     await addCloudLog(uid, email, 'Subscription Tracked', `Subscribed to '${name}' for ₹${cost}/month.`, 'SUBSCRIPTION');
+    await get().refreshUserData();
+  },
+
+  updateSubscription: async (sub) => {
+    const uid = currentUid();
+    if (!uid) return;
+    await updateCloudSubscription(uid, sub);
     await get().refreshUserData();
   },
 
@@ -525,10 +558,71 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     await get().refreshUserData();
   },
 
+  stopSubscription: async (sub) => {
+    const email = get().currentUserEmail;
+    const uid = currentUid();
+    if (!email || !uid) return;
+    await updateCloudSubscription(uid, {
+      ...sub,
+      isActive: false,
+      isAlertEnabled: false,
+    });
+    await addCloudLog(uid, email, 'Subscription Stopped', `Stopped subscription '${sub.name}'.`, 'SUBSCRIPTION');
+    await get().refreshUserData();
+  },
+
   deleteSubscription: async (sub) => {
     const uid = currentUid();
     if (!uid) return;
     await deleteCloudSubscription(uid, sub.id);
+    await get().refreshUserData();
+  },
+
+  addBill: async (name, amount, cycle, category, isAlertEnabled = true) => {
+    const email = get().currentUserEmail;
+    const uid = currentUid();
+    if (!email || !uid) return;
+    await addCloudBill(uid, {
+      userEmail: email,
+      name,
+      amount,
+      billingCycle: cycle,
+      nextPaymentMillis: Date.now() + 86400000 * 30,
+      category,
+      isAlertEnabled,
+      isActive: true,
+    });
+    await addCloudLog(uid, email, 'Bill Tracked', `Bill '${name}' set for ₹${amount} (${cycle.toLowerCase()}).`, 'SYSTEM');
+    await get().refreshUserData();
+  },
+
+  updateBill: async (bill) => {
+    const uid = currentUid();
+    if (!uid) return;
+    await updateCloudBill(uid, bill);
+    await get().refreshUserData();
+  },
+
+  toggleBillAlert: async (bill) => {
+    const uid = currentUid();
+    if (!uid) return;
+    await updateCloudBill(uid, { ...bill, isAlertEnabled: !bill.isAlertEnabled });
+    await get().refreshUserData();
+  },
+
+  stopBill: async (bill) => {
+    const email = get().currentUserEmail;
+    const uid = currentUid();
+    if (!email || !uid) return;
+    await updateCloudBill(uid, { ...bill, isActive: false, isAlertEnabled: false });
+    await addCloudLog(uid, email, 'Bill Stopped', `Stopped bill '${bill.name}'.`, 'SYSTEM');
+    await get().refreshUserData();
+  },
+
+  deleteBill: async (bill) => {
+    const uid = currentUid();
+    if (!uid) return;
+    await deleteCloudBill(uid, bill.id);
     await get().refreshUserData();
   },
 
@@ -805,6 +899,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       expenses: state.expenses,
       liabilities: state.liabilities,
       subscriptions: state.subscriptions,
+      bills: state.bills,
       savingGoals: state.savingGoals,
       categoryBudgets: state.categoryBudgets,
       budgetTemplates: state.budgetTemplates,
@@ -852,7 +947,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     const { expenses, liabilities, savingGoals } = get();
     const rows: string[][] = [];
     expenses.forEach((it) => rows.push(['Expense', it.title, `₹${it.amount}`, it.category, new Date(it.dateMillis).toISOString().slice(0, 10), it.notes]));
-    liabilities.forEach((it) => rows.push(['Liability', it.name, `₹${it.amount}`, it.category, new Date(it.dueDateMillis).toISOString().slice(0, 10), `Paid: ${it.isPaid}, Freq: ${it.frequency}`]));
+    liabilities.forEach((it) => rows.push(['Liability', it.name, `₹${it.amount}`, it.frequency, new Date(it.dueDateMillis).toISOString().slice(0, 10), `Paid: ${it.isPaid}, Freq: ${it.frequency}`]));
     savingGoals.forEach((it) => rows.push(['SavingsGoal', it.name, `₹${it.targetAmount}`, 'Savings', new Date(it.targetDateMillis).toISOString().slice(0, 10), `Saved: ₹${it.savedAmount}, Req: ₹${it.currentRequiredMonthly}/mo`]));
 
     if (!token || token === 'MOCK_TOKEN' || token.length < 10) {

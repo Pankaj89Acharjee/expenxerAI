@@ -8,7 +8,6 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
-  KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
@@ -18,6 +17,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
 import { useColorScheme } from '@/components/useColorScheme';
 import { EXPENSE_CATEGORIES, FORM_CATEGORIES } from '@/src/constants/categories';
 import { Colors, themeColors } from '@/src/theme/colors';
@@ -473,12 +473,21 @@ export default function ExpenseScreen() {
 
       {/* Add / Edit expense modal */}
       <Modal visible={showAdd} transparent animationType="fade" onRequestClose={closeModal}>
-        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: isDark ? colors.card : colors.card, borderColor: colors.border }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>
               {editing ? 'Edit Expense' : 'Log New Expense'}
             </Text>
-            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.modalScroll}>
+            <KeyboardAwareScrollView
+              style={styles.modalScrollView}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="none"
+              contentContainerStyle={styles.modalScroll}
+              bottomOffset={24}
+              extraKeyboardSpace={0}
+              nestedScrollEnabled
+            >
               <TextInput
                 style={[styles.modalInput, inputStyle(colors, isDark)]}
                 placeholder="Title / Description"
@@ -549,14 +558,14 @@ export default function ExpenseScreen() {
                   {saving ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.saveBtnText}>Save</Text>}
                 </Pressable>
               </View>
-            </ScrollView>
+            </KeyboardAwareScrollView>
           </View>
-        </KeyboardAvoidingView>
+        </View>
       </Modal>
 
       {/* Settlement modal */}
       <Modal visible={!!settlingExpense} transparent animationType="fade" onRequestClose={closeSettlement}>
-        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>Record Settlement</Text>
             {settlingExpense ? (
@@ -564,7 +573,16 @@ export default function ExpenseScreen() {
                 {settlingExpense.title} — {formatCurrency(settlingExpense.amount)}
               </Text>
             ) : null}
-            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.modalScroll}>
+            <KeyboardAwareScrollView
+              style={styles.modalScrollView}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="none"
+              contentContainerStyle={styles.modalScroll}
+              bottomOffset={24}
+              extraKeyboardSpace={0}
+              nestedScrollEnabled
+            >
               <Pressable
                 style={[styles.modalInput, styles.dateField, inputStyle(colors, isDark)]}
                 onPress={() => setShowSettlementDatePicker(true)}
@@ -606,9 +624,9 @@ export default function ExpenseScreen() {
                   )}
                 </Pressable>
               </View>
-            </ScrollView>
+            </KeyboardAwareScrollView>
           </View>
-        </KeyboardAvoidingView>
+        </View>
       </Modal>
     </View>
   );
@@ -698,7 +716,9 @@ const styles = StyleSheet.create({
     paddingTop: 22,
     paddingHorizontal: 22,
     paddingBottom: 8,
+    overflow: 'hidden',
   },
+  modalScrollView: { flexGrow: 0, flexShrink: 1 },
   modalScroll: { gap: 12, paddingBottom: 16 },
   modalTitle: { fontSize: 20, fontWeight: '800', marginBottom: 4 },
   modalInput: { borderWidth: 1, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 13, fontSize: 15 },

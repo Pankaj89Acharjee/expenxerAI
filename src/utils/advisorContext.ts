@@ -1,4 +1,5 @@
 import type {
+  Bill,
   BudgetTemplate,
   CategoryBudget,
   Expense,
@@ -9,6 +10,8 @@ import type {
   Subscription,
   UserProfile,
 } from '@/src/types/models';
+import { getLiabilityRemainingAmount, isLiabilityFullyPaid } from '@/src/utils/liabilitySchedule';
+import { sumActiveBillsMonthly, sumActiveSubscriptionsMonthly, toMonthlyAmount } from '@/src/utils/plannerTotals';
 import { calculateSettlements } from '@/src/utils/settlements';
 import { currentMonthYear, formatDate, parseJsonToMap } from '@/src/utils/format';
 
@@ -17,6 +20,7 @@ export interface AdvisorContextInput {
   expenses: Expense[];
   liabilities: Liability[];
   subscriptions: Subscription[];
+  bills: Bill[];
   savingGoals: SavingGoal[];
   categoryBudgets: CategoryBudget[];
   budgetTemplates: BudgetTemplate[];
@@ -92,6 +96,7 @@ export function buildAdvisorSystemPrompt(input: AdvisorContextInput): string {
     expenses,
     liabilities,
     subscriptions,
+    bills,
     savingGoals,
     categoryBudgets,
     budgetTemplates,
@@ -148,18 +153,30 @@ export function buildAdvisorSystemPrompt(input: AdvisorContextInput): string {
 
   const liabilityText = liabilities.length
     ? liabilities
+        .filter((l) => !isLiabilityFullyPaid(l))
         .map(
           (l) =>
-            `${l.name} ₹${l.amount.toFixed(2)} | ${l.frequency} | due ${formatDate(l.dueDateMillis)} | ${l.isPaid ? 'PAID' : 'UNPAID'} | ${l.category}`
+            `${l.name} remaining ₹${getLiabilityRemainingAmount(l).toFixed(2)} of ₹${l.amount.toFixed(2)} | ${l.frequency} | due ${formatDate(l.dueDateMillis)}`
         )
         .join('\n')
     : 'None';
 
   const subText = subscriptions.length
     ? subscriptions
+        .filter((s) => s.isActive)
         .map(
           (s) =>
-            `${s.name} ₹${s.cost.toFixed(2)}/${s.billingCycle} | next ${formatDate(s.nextPaymentMillis)} | ${s.category}`
+            `${s.name} ₹${toMonthlyAmount(s.cost, s.billingCycle).toFixed(2)}/mo equiv (₹${s.cost}/${s.billingCycle}) | next ${formatDate(s.nextPaymentMillis)} | ${s.category}`
+        )
+        .join('; ')
+    : 'None';
+
+  const billsText = bills.length
+    ? bills
+        .filter((b) => b.isActive)
+        .map(
+          (b) =>
+            `${b.name} ₹${toMonthlyAmount(b.amount, b.billingCycle).toFixed(2)}/mo equiv (₹${b.amount}/${b.billingCycle}) | next ${formatDate(b.nextPaymentMillis)} | ${b.category}`
         )
         .join('; ')
     : 'None';
@@ -223,8 +240,13 @@ ${borrowingText}
 === LIABILITIES ===
 ${liabilityText}
 
-=== SUBSCRIPTIONS ===
+=== SUBSCRIPTIONS (active, monthly equivalent) ===
 ${subText}
+
+=== BILLS (active, monthly equivalent) ===
+${billsText}
+
+Monthly committed (subs + bills): ₹${(sumActiveSubscriptionsMonthly(subscriptions) + sumActiveBillsMonthly(bills)).toFixed(2)}
 
 === SAVINGS GOALS ===
 ${goalsText}

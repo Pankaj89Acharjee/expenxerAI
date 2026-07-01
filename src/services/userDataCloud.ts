@@ -12,6 +12,7 @@ import { getFirebaseFirestore } from '@/src/services/firebase';
 import { calculateSavingMetrics } from '@/src/utils/savingGoals';
 import type {
   BudgetTemplate,
+  Bill,
   CategoryBudget,
   GroupExpense,
   Liability,
@@ -54,10 +55,10 @@ export async function fetchLiabilities(uid: string): Promise<Liability[]> {
         name: String(data.name ?? ''),
         amount: Number(data.amount ?? 0),
         frequency: String(data.frequency ?? ''),
-        category: String(data.category ?? ''),
         dueDateMillis: Number(data.dueDateMillis ?? 0),
         isPaid: Boolean(data.isPaid),
         autoRecalculate: data.autoRecalculate !== false,
+        paymentScheduleJson: data.paymentScheduleJson != null ? String(data.paymentScheduleJson) : undefined,
       } satisfies Liability;
     })
     .sort((a, b) => a.dueDateMillis - b.dueDateMillis);
@@ -69,10 +70,10 @@ export async function addLiability(uid: string, liability: Omit<Liability, 'id'>
     name: liability.name,
     amount: liability.amount,
     frequency: liability.frequency,
-    category: liability.category,
     dueDateMillis: liability.dueDateMillis,
     isPaid: liability.isPaid,
     autoRecalculate: liability.autoRecalculate,
+    paymentScheduleJson: liability.paymentScheduleJson ?? '[]',
   });
 }
 
@@ -82,10 +83,10 @@ export async function updateLiability(uid: string, liability: Liability): Promis
     name: liability.name,
     amount: liability.amount,
     frequency: liability.frequency,
-    category: liability.category,
     dueDateMillis: liability.dueDateMillis,
     isPaid: liability.isPaid,
     autoRecalculate: liability.autoRecalculate,
+    paymentScheduleJson: liability.paymentScheduleJson ?? '[]',
   }, liability.id);
 }
 
@@ -108,6 +109,7 @@ export async function fetchSubscriptions(uid: string): Promise<Subscription[]> {
         nextPaymentMillis: Number(data.nextPaymentMillis ?? 0),
         category: String(data.category ?? ''),
         isAlertEnabled: data.isAlertEnabled !== false,
+        isActive: data.isActive !== false,
         lastPaidMillis: data.lastPaidMillis != null ? Number(data.lastPaidMillis) : null,
       } satisfies Subscription;
     })
@@ -123,6 +125,7 @@ export async function addSubscription(uid: string, sub: Omit<Subscription, 'id'>
     nextPaymentMillis: sub.nextPaymentMillis,
     category: sub.category,
     isAlertEnabled: sub.isAlertEnabled,
+    isActive: sub.isActive,
     lastPaidMillis: sub.lastPaidMillis ?? null,
   });
 }
@@ -136,12 +139,72 @@ export async function updateSubscription(uid: string, sub: Subscription): Promis
     nextPaymentMillis: sub.nextPaymentMillis,
     category: sub.category,
     isAlertEnabled: sub.isAlertEnabled,
+    isActive: sub.isActive,
     lastPaidMillis: sub.lastPaidMillis ?? null,
   }, sub.id);
 }
 
 export async function deleteSubscription(uid: string, id: string): Promise<void> {
   await deleteDoc(userDoc(uid, 'subscriptions', id));
+}
+
+// --- Bills (rent, utilities, school fees) ---
+export async function fetchBills(uid: string): Promise<Bill[]> {
+  const snap = await getDocs(userCol(uid, 'bills'));
+  return snap.docs
+    .map((d) => {
+      const data = d.data();
+      return {
+        id: d.id,
+        userEmail: String(data.userEmail ?? ''),
+        name: String(data.name ?? ''),
+        amount: Number(data.amount ?? 0),
+        billingCycle: String(data.billingCycle ?? 'MONTHLY'),
+        nextPaymentMillis: Number(data.nextPaymentMillis ?? 0),
+        category: String(data.category ?? ''),
+        isAlertEnabled: data.isAlertEnabled !== false,
+        isActive: data.isActive !== false,
+        lastPaidMillis: data.lastPaidMillis != null ? Number(data.lastPaidMillis) : null,
+      } satisfies Bill;
+    })
+    .sort((a, b) => a.nextPaymentMillis - b.nextPaymentMillis);
+}
+
+export async function addBill(uid: string, bill: Omit<Bill, 'id'>): Promise<string> {
+  return saveItem(uid, 'bills', {
+    userEmail: bill.userEmail,
+    name: bill.name,
+    amount: bill.amount,
+    billingCycle: bill.billingCycle,
+    nextPaymentMillis: bill.nextPaymentMillis,
+    category: bill.category,
+    isAlertEnabled: bill.isAlertEnabled,
+    isActive: bill.isActive,
+    lastPaidMillis: bill.lastPaidMillis ?? null,
+  });
+}
+
+export async function updateBill(uid: string, bill: Bill): Promise<void> {
+  await saveItem(
+    uid,
+    'bills',
+    {
+      userEmail: bill.userEmail,
+      name: bill.name,
+      amount: bill.amount,
+      billingCycle: bill.billingCycle,
+      nextPaymentMillis: bill.nextPaymentMillis,
+      category: bill.category,
+      isAlertEnabled: bill.isAlertEnabled,
+      isActive: bill.isActive,
+      lastPaidMillis: bill.lastPaidMillis ?? null,
+    },
+    bill.id
+  );
+}
+
+export async function deleteBill(uid: string, id: string): Promise<void> {
+  await deleteDoc(userDoc(uid, 'bills', id));
 }
 
 // --- Saving Goals ---

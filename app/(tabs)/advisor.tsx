@@ -257,7 +257,10 @@ export default function AdvisorScreen() {
 
   const composer = (
     <View
-      style={[styles.composer, { paddingBottom: Math.max(insets.bottom, 8) }]}
+      style={[
+        styles.composer,
+        { paddingBottom: Platform.OS === 'ios' ? Math.max(insets.bottom, 8) : 6 },
+      ]}
       onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
     >
       {pendingAttachments.length > 0 && (
@@ -371,7 +374,7 @@ export default function AdvisorScreen() {
           gap: 12,
         }}
         keyboardShouldPersistTaps="handled"
-        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+        keyboardDismissMode="none"
         onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
         renderItem={renderMessage}
         ListFooterComponent={
@@ -383,7 +386,10 @@ export default function AdvisorScreen() {
         }
       />
 
-      <KeyboardStickyView offset={{ closed: 0, opened: 0 }} style={styles.composerWrap}>
+      <KeyboardStickyView
+        offset={{ closed: 0, opened: Platform.OS === 'android' ? -6 : 0 }}
+        style={styles.composerWrap}
+      >
         {composer}
       </KeyboardStickyView>
 

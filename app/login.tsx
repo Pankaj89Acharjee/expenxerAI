@@ -189,6 +189,7 @@ export default function LoginScreen() {
 
   const submit = async () => {
     if (!firebaseReady) { setError('Firebase not configured — add EXPO_PUBLIC_FIREBASE_* to your .env.'); return; }
+    console.log('firebaseReady', firebaseReady);
     if (!email.trim() || !password.trim()) { setError('Please fill in all details.'); return; }
     if (isRegister && (!name.trim() || !income.trim())) { setError('Please fill in all details.'); return; }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError('Please enter a valid email.'); return; }

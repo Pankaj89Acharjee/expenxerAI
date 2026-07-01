@@ -18,10 +18,21 @@ export interface Liability {
   name: string;
   amount: number;
   frequency: string;
-  category: string;
   dueDateMillis: number;
   isPaid: boolean;
   autoRecalculate: boolean;
+  paymentScheduleJson?: string;
+}
+
+export interface LiabilityInstallment {
+  index: number;
+  label: string;
+  monthYear: string;
+  amount: number;
+  dueDateMillis: number;
+  isPaymentDone: boolean;
+  paymentDateMillis: number | null;
+  isDue: boolean;
 }
 
 export interface Subscription {
@@ -33,6 +44,20 @@ export interface Subscription {
   nextPaymentMillis: number;
   category: string;
   isAlertEnabled: boolean;
+  isActive: boolean;
+  lastPaidMillis?: number | null;
+}
+
+export interface Bill {
+  id: string;
+  userEmail: string;
+  name: string;
+  amount: number;
+  billingCycle: string;
+  nextPaymentMillis: number;
+  category: string;
+  isAlertEnabled: boolean;
+  isActive: boolean;
   lastPaidMillis?: number | null;
 }
 

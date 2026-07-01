@@ -18,6 +18,8 @@ import { useColorScheme } from '@/components/useColorScheme';
 import { useFinancialStore } from '@/src/store/useFinancialStore';
 import { themeColors, Colors } from '@/src/theme/colors';
 import { formatCurrency, formatDate, greeting } from '@/src/utils/format';
+import { getLiabilityRemainingAmount } from '@/src/utils/liabilitySchedule';
+import { computePlannerBreakdown, nextUnpaidLiability } from '@/src/utils/plannerTotals';
 import { exportCsv, exportPdfReport } from '@/src/utils/export';
 import type { SavingGoal } from '@/src/types/models';
 
@@ -79,6 +81,7 @@ export default function DashboardScreen() {
   const expenses = useFinancialStore((s) => s.expenses);
   const liabilities = useFinancialStore((s) => s.liabilities);
   const subscriptions = useFinancialStore((s) => s.subscriptions);
+  const bills = useFinancialStore((s) => s.bills);
   const savingGoals = useFinancialStore((s) => s.savingGoals);
   const logs = useFinancialStore((s) => s.logs);
   const aiReportAdvice = useFinancialStore((s) => s.aiReportAdvice);
@@ -106,9 +109,11 @@ export default function DashboardScreen() {
   const percentSpent = Math.min(totalExpenses / monthlyIncome, 1);
   const remainingBudget = Math.max(monthlyIncome - totalExpenses, 0);
 
-  const nextLiability = useMemo(
-    () => liabilities.filter((l) => !l.isPaid).sort((a, b) => a.dueDateMillis - b.dueDateMillis)[0],
-    [liabilities]
+  const nextLiability = useMemo(() => nextUnpaidLiability(liabilities), [liabilities]);
+
+  const plannerBreakdown = useMemo(
+    () => computePlannerBreakdown(liabilities, subscriptions, bills),
+    [liabilities, subscriptions, bills]
   );
 
   const trendData = useMemo(() => {
@@ -154,14 +159,9 @@ export default function DashboardScreen() {
     [expenses]
   );
 
-  const plannerTotal = useMemo(() => {
-    const liabilitySum = liabilities.filter((l) => !l.isPaid).reduce((s, l) => s + l.amount, 0);
-    const subSum = subscriptions.reduce((s, sub) => s + sub.cost, 0);
-    return liabilitySum + subSum;
-  }, [liabilities, subscriptions]);
-
   const expensesDisplay = totalExpenses > 0 ? formatCurrency(totalExpenses) : '-';
-  const plannerDisplay = plannerTotal > 0 ? formatCurrency(plannerTotal) : '-';
+  const plannerCommittedDisplay =
+    plannerBreakdown.committedMonthly > 0 ? `${formatCurrency(plannerBreakdown.committedMonthly)}/mo` : '-';
 
   const handleContribute = async () => {
     if (!contribGoal) return;
@@ -260,7 +260,9 @@ export default function DashboardScreen() {
           {nextLiability ? (
             <>
               <Text style={[styles.liabilityName, { color: isDark ? '#fff' : Colors.secondaryBlue }]}>{nextLiability.name}</Text>
-              <Text style={{ color: colors.emeraldText, fontWeight: '600', fontSize: 12 }}>{formatDate(nextLiability.dueDateMillis)} • {formatCurrency(nextLiability.amount)}</Text>
+              <Text style={{ color: colors.emeraldText, fontWeight: '600', fontSize: 12 }}>
+                {formatDate(nextLiability.dueDateMillis)} • {formatCurrency(getLiabilityRemainingAmount(nextLiability))} left
+              </Text>
             </>
           ) : (
             <>
@@ -452,6 +454,44 @@ export default function DashboardScreen() {
         </Pressable>
       </View>
 
+      {/* Planner breakdown — liabilities, subscriptions, bills kept separate */}
+      <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+        <Text style={[styles.cardTitle, { color: colors.text }]}>Planner Overview</Text>
+        <View style={styles.plannerRow}>
+          <View style={styles.plannerRowLeft}>
+            <MaterialIcons name="account-balance-wallet" size={18} color={colors.primary} />
+            <Text style={[styles.plannerRowLabel, { color: colors.textMuted }]}>Liabilities (unpaid)</Text>
+          </View>
+          <Text style={[styles.plannerRowValue, { color: colors.text }]}>
+            {plannerBreakdown.liabilityRemaining > 0 ? formatCurrency(plannerBreakdown.liabilityRemaining) : '—'}
+          </Text>
+        </View>
+        <View style={[styles.plannerRow, { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border }]}>
+          <View style={styles.plannerRowLeft}>
+            <MaterialIcons name="subscriptions" size={18} color={colors.primary} />
+            <Text style={[styles.plannerRowLabel, { color: colors.textMuted }]}>Subscriptions / mo</Text>
+          </View>
+          <Text style={[styles.plannerRowValue, { color: colors.text }]}>
+            {plannerBreakdown.subscriptionsMonthly > 0 ? formatCurrency(plannerBreakdown.subscriptionsMonthly) : '—'}
+          </Text>
+        </View>
+        <View style={[styles.plannerRow, { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border }]}>
+          <View style={styles.plannerRowLeft}>
+            <MaterialIcons name="receipt-long" size={18} color={colors.primary} />
+            <Text style={[styles.plannerRowLabel, { color: colors.textMuted }]}>Bills / mo</Text>
+          </View>
+          <Text style={[styles.plannerRowValue, { color: colors.text }]}>
+            {plannerBreakdown.billsMonthly > 0 ? formatCurrency(plannerBreakdown.billsMonthly) : '—'}
+          </Text>
+        </View>
+        <View style={[styles.plannerCommitted, { backgroundColor: colors.emeraldSoft }]}>
+          <Text style={{ color: colors.emeraldText, fontWeight: '600', fontSize: 13 }}>Monthly committed</Text>
+          <Text style={{ color: colors.emeraldText, fontWeight: '800', fontSize: 16 }}>
+            {plannerBreakdown.committedMonthly > 0 ? formatCurrency(plannerBreakdown.committedMonthly) : '—'}
+          </Text>
+        </View>
+      </View>
+
       {/* Quick Nav for viewing Expense and Planner */}
       <View style={styles.actionRow}>
         <Pressable
@@ -475,7 +515,8 @@ export default function DashboardScreen() {
               <MaterialIcons name="event-note" size={20} color="#E0E7FF" />
             </View>
             <Text style={styles.navCardLabel} numberOfLines={1}>Planner</Text>
-            <Text style={styles.navCardValue} numberOfLines={1}>{plannerDisplay}</Text>
+            <Text style={styles.navCardValue} numberOfLines={1}>{plannerCommittedDisplay}</Text>
+            <Text style={styles.navCardHint} numberOfLines={1}>subs + bills / mo</Text>
           </LinearGradient>
         </Pressable>
       </View>
@@ -697,6 +738,24 @@ const styles = StyleSheet.create({
   },
   navCardLabel: { color: '#F8FAFC', fontSize: 11, fontWeight: '700', textAlign: 'center' },
   navCardValue: { color: '#FFFFFF', fontSize: 13, fontWeight: '800', textAlign: 'center' },
+  navCardHint: { color: 'rgba(255,255,255,0.75)', fontSize: 9, fontWeight: '600', textAlign: 'center' },
+  plannerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+  },
+  plannerRowLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
+  plannerRowLabel: { fontSize: 13, fontWeight: '600' },
+  plannerRowValue: { fontSize: 15, fontWeight: '800' },
+  plannerCommitted: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 8,
+    padding: 12,
+    borderRadius: 12,
+  },
   autoRow: { flexDirection: 'row', gap: 8 },
   autoBtn: { flex: 1, padding: 12, borderRadius: 12, alignItems: 'center' },
   navBtn: { flex: 1, padding: 12, borderRadius: 12, borderWidth: 1, alignItems: 'center' },

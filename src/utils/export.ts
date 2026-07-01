@@ -16,7 +16,7 @@ export async function exportCsv(
   });
   liabilities.forEach((it) => {
     const dateStr = formatDate(it.dueDateMillis);
-    csv += `Liability,"${it.name.replace(/"/g, '""')}",${it.amount},"${it.category}",${dateStr},"Paid: ${it.isPaid}, Freq: ${it.frequency}"\n`;
+    csv += `Liability,"${it.name.replace(/"/g, '""')}",${it.amount},"${it.frequency}",${dateStr},"Paid: ${it.isPaid}, Freq: ${it.frequency}"\n`;
   });
   goals.forEach((it) => {
     const dateStr = formatDate(it.targetDateMillis);
