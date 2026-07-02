@@ -92,6 +92,7 @@ export default function ExpenseScreen() {
     }
   }, [categoryParam]);
 
+  // Settlement view is when the selected category is a settlement category
   const isSettlementView = SETTLEMENT_CATEGORIES.has(selectedCategory);
   const activeTimeFrame = TIME_FRAMES.find((t) => t.key === timeFrame) ?? TIME_FRAMES[1];
 
