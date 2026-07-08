@@ -30,7 +30,29 @@ import {
   uploadChatAttachment,
 } from '@/src/services/chatCloud';
 import { buildAdvisorSystemPrompt } from '@/src/utils/advisorContext';
-import { buildSchedule, serializeInstallments } from '@/src/utils/liabilitySchedule';
+import { calculateMonthlyEmi } from '@/src/utils/emiCalculator';
+import { buildSchedule, buildLoanEmiSchedule, completeLiabilityPayment, isLoanLiability, mergeLiabilitySchedule, parseInstallments, serializeInstallments, settleInstallmentOnLiability, shouldRecordPayment, syncAllLiabilityPaymentStatuses } from '@/src/utils/liabilitySchedule';
+import { billExpenseCategory } from '@/src/constants/billPurposes';
+import {
+  billPaymentExpensesNeedSync,
+  buildLiabilityInstallmentExpenseTitle,
+  findPlannerLiabilityExpense,
+  installmentExpenseAmount,
+  liabilityExpenseCategory,
+  listBillPaymentExpenses,
+  listSubscriptionPaymentExpenses,
+  plannerLiabilityExpenseNote,
+  subscriptionPaymentExpensesNeedSync,
+  syncBillPaymentExpenses,
+  syncSubscriptionPaymentExpenses,
+} from '@/src/utils/plannerExpenses';
+import {
+  appendBillPaymentHistory,
+  appendSubscriptionPaymentHistory,
+  normalizeNextPaymentDate,
+  recordRecurringPayment,
+  startOfDay,
+} from '@/src/utils/recurringBilling';
 import { createAndPopulateGoogleSheet, sendGmailReport } from '@/src/services/googleApi';
 import {
   fetchCloudProfile,
@@ -77,6 +99,7 @@ import type {
   Expense,
   GroupExpense,
   Liability,
+  LiabilityKind,
   NotificationLog,
   SavingGoal,
   SplitGroup,
@@ -94,6 +117,7 @@ const PREFS = {
 };
 
 let authUnsubscribe: (() => void) | null = null;
+let plannerExpenseBackfillRunning = false;
 
 function currentUid(): string | null {
   return getFirebaseAuth().currentUser?.uid ?? null;
@@ -216,7 +240,20 @@ interface FinancialState {
   suggestCategory: (title: string, amount: number, categories: string[]) => Promise<string>;
 
   addLiability: (name: string, amount: number, frequency: string, dueDateMillis: number) => Promise<void>;
-  updateLiability: (liability: Liability) => Promise<void>;
+  addLoan: (
+    name: string,
+    loanType: string,
+    principal: number,
+    emiAmount: number,
+    tenureMonths: number,
+    firstEmiDueMillis: number,
+    interestRatePercent?: number | null,
+    lender?: string | null,
+    kind?: LiabilityKind
+  ) => Promise<void>;
+  updateLoan: (liability: Liability) => Promise<void>;
+  updateLiability: (liability: Liability, previous?: Liability | null) => Promise<void>;
+  settleLiabilityInstallment: (liabilityId: string, installmentIndex: number) => Promise<void>;
   deleteLiability: (liability: Liability) => Promise<void>;
 
   addSubscription: (
@@ -224,15 +261,27 @@ interface FinancialState {
     cost: number,
     cycle: string,
     category: string,
-    isAlertEnabled?: boolean
+    nextPaymentMillis: number,
+    isAlertEnabled?: boolean,
+    paymentDateMillis?: number | null
   ) => Promise<void>;
   updateSubscription: (sub: Subscription) => Promise<void>;
+  recordSubscriptionPayment: (sub: Subscription, paymentDateMillis: number) => Promise<void>;
   toggleSubscriptionAlert: (sub: Subscription) => Promise<void>;
   stopSubscription: (sub: Subscription) => Promise<void>;
   deleteSubscription: (sub: Subscription) => Promise<void>;
 
-  addBill: (name: string, amount: number, cycle: string, category: string, isAlertEnabled?: boolean) => Promise<void>;
+  addBill: (
+    name: string,
+    amount: number,
+    cycle: string,
+    category: string,
+    nextPaymentMillis: number,
+    isAlertEnabled?: boolean,
+    paymentDateMillis?: number | null
+  ) => Promise<void>;
   updateBill: (bill: Bill) => Promise<void>;
+  recordBillPayment: (bill: Bill, paymentDateMillis: number) => Promise<void>;
   toggleBillAlert: (bill: Bill) => Promise<void>;
   stopBill: (bill: Bill) => Promise<void>;
   deleteBill: (bill: Bill) => Promise<void>;
@@ -330,11 +379,10 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     if (!email || !uid) return;
 
     const monthYear = currentMonthYear();
-    const [profile, expenses, liabilities, subscriptions, bills, savingGoals, groups, logs, budgetTemplates, categoryBudgets, allGroupExpenses] =
+    const [profile, expensesRaw, subscriptions, bills, savingGoals, groups, logs, budgetTemplates, categoryBudgets, allGroupExpenses] =
       await Promise.all([
         fetchCloudProfile(uid),
         fetchCloudExpenses(uid),
-        fetchLiabilities(uid),
         fetchSubscriptions(uid),
         fetchBills(uid),
         fetchSavingGoals(uid),
@@ -344,9 +392,66 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
         fetchCategoryBudgets(uid, monthYear),
         fetchAllGroupExpenses(uid),
       ]);
-    set({ userProfile: profile, expenses, liabilities, subscriptions, bills, savingGoals, groups, logs, budgetTemplates, categoryBudgets, allGroupExpenses });
+    const liabilitiesRaw = await fetchLiabilities(uid);
+    const { liabilities, changed } = syncAllLiabilityPaymentStatuses(liabilitiesRaw);
+    if (changed.length > 0) {
+      await Promise.all(changed.map((liability) => updateCloudLiability(uid, liability)));
+    }
+
+    // Paint UI immediately — deferred backfill must not block FlatList updates.
+    set({
+      userProfile: profile,
+      expenses: expensesRaw,
+      liabilities,
+      subscriptions,
+      bills,
+      savingGoals,
+      groups,
+      logs,
+      budgetTemplates,
+      categoryBudgets,
+      allGroupExpenses,
+    });
     await get().refreshGroupExpenses();
-    await get().refreshChat();
+    void get().refreshChat();
+
+    if (plannerExpenseBackfillRunning) return;
+    plannerExpenseBackfillRunning = true;
+    // Run after the current event loop drains so FlatLists paint first.
+    const defer: (cb: () => void) => void =
+      typeof requestIdleCallback === 'function'
+        ? (cb) => requestIdleCallback(cb)
+        : (cb) => setTimeout(cb, 0);
+    defer(() => {
+      void (async () => {
+        try {
+          const liveExpenses = await fetchCloudExpenses(uid);
+          const liveSubs = get().subscriptions;
+          const liveBills = get().bills;
+          const subsNeedingExpenseSync = liveSubs.filter((sub) =>
+            subscriptionPaymentExpensesNeedSync(sub, liveExpenses)
+          );
+          const billsNeedingExpenseSync = liveBills.filter((bill) =>
+            billPaymentExpensesNeedSync(bill, liveExpenses)
+          );
+          if (subsNeedingExpenseSync.length === 0 && billsNeedingExpenseSync.length === 0) return;
+
+          // Sequential so each sync sees newly created expense rows.
+          for (const sub of subsNeedingExpenseSync) {
+            await syncSubscriptionPaymentExpenses(uid, sub, get().expenses);
+          }
+          for (const bill of billsNeedingExpenseSync) {
+            await syncBillPaymentExpenses(uid, bill, get().expenses);
+          }
+          const expenses = await fetchCloudExpenses(uid);
+          if (currentUid() === uid) set({ expenses });
+        } catch {
+          // Backfill is best-effort; next refresh retries.
+        } finally {
+          plannerExpenseBackfillRunning = false;
+        }
+      })();
+    });
   },
 
   refreshGroupExpenses: async () => {
@@ -507,15 +612,150 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       isPaid: false,
       autoRecalculate: true,
       paymentScheduleJson: serializeInstallments(schedule),
+      paymentDateMillis: null,
+      paymentHistoryJson: '[]',
+      kind: 'ANNUAL',
+      loanType: null,
+      principal: null,
+      emiAmount: null,
+      tenureMonths: null,
+      interestRatePercent: null,
+      lender: null,
     });
     await addCloudLog(uid, email, 'Liability Created', `New ${frequency.toLowerCase()} liability '${name}' set for ₹${amount}.`, 'LIABILITY');
     await get().refreshUserData();
   },
 
-  updateLiability: async (liability) => {
+  addLoan: async (name, loanType, principal, emiAmount, tenureMonths, firstEmiDueMillis, interestRatePercent, lender, kind = 'LOAN') => {
+    const email = get().currentUserEmail;
+    const uid = currentUid();
+    if (!email || !uid) return;
+    const resolvedEmi =
+      calculateMonthlyEmi(principal, interestRatePercent ?? 0, tenureMonths) || emiAmount;
+    const schedule = buildLoanEmiSchedule(resolvedEmi, tenureMonths, firstEmiDueMillis);
+    const liabilityKind: LiabilityKind = kind === 'CREDIT_CARD_LOAN' ? 'CREDIT_CARD_LOAN' : 'LOAN';
+    await addCloudLiability(uid, {
+      userEmail: email,
+      name,
+      amount: principal,
+      principal,
+      emiAmount: resolvedEmi,
+      tenureMonths,
+      frequency: 'MONTHLY',
+      dueDateMillis: firstEmiDueMillis,
+      isPaid: false,
+      autoRecalculate: false,
+      paymentScheduleJson: serializeInstallments(schedule),
+      paymentDateMillis: null,
+      paymentHistoryJson: '[]',
+      kind: liabilityKind,
+      loanType: loanType as Liability['loanType'],
+      interestRatePercent: interestRatePercent ?? null,
+      lender: lender ?? null,
+    });
+    await addCloudLog(
+      uid,
+      email,
+      liabilityKind === 'CREDIT_CARD_LOAN' ? 'Credit Card Loan Added' : 'Loan Added',
+      `${loanType.replace(/_/g, ' ')} '${name}' — ₹${resolvedEmi}/mo for ${tenureMonths} months.`,
+      'LIABILITY'
+    );
+    await get().refreshUserData();
+  },
+
+  updateLoan: async (liability) => {
+    const uid = currentUid();
+    if (!uid || !isLoanLiability(liability)) return;
+    const principal = liability.principal ?? liability.amount;
+    const tenureMonths = liability.tenureMonths ?? 12;
+    const emiAmount =
+      calculateMonthlyEmi(principal, liability.interestRatePercent ?? 0, tenureMonths) ||
+      (liability.emiAmount ?? 0);
+    const existing = parseInstallments(liability.paymentScheduleJson ?? '');
+    const fresh = buildLoanEmiSchedule(emiAmount, tenureMonths, liability.dueDateMillis);
+    const merged = fresh.map((inst, i) => {
+      const prev = existing[i];
+      if (!prev?.isPaymentDone) return inst;
+      return {
+        ...inst,
+        isPaymentDone: true,
+        paymentDateMillis: prev.paymentDateMillis,
+        paymentStatus: 'done' as const,
+        isOverdue: false,
+      };
+    });
+    await updateCloudLiability(uid, {
+      ...liability,
+      amount: principal,
+      principal,
+      emiAmount,
+      paymentScheduleJson: serializeInstallments(merged),
+    });
+    await get().refreshUserData();
+  },
+
+  updateLiability: async (liability, previous) => {
     const uid = currentUid();
     if (!uid) return;
-    await updateCloudLiability(uid, liability);
+    let toSave = liability;
+    if (
+      !isLoanLiability(liability) &&
+      shouldRecordPayment(previous ?? null, liability.paymentDateMillis)
+    ) {
+      toSave = completeLiabilityPayment(liability, liability.paymentDateMillis);
+      const email = get().currentUserEmail;
+      if (email) {
+        await addCloudLog(
+          uid,
+          email,
+          'Liability Paid',
+          `'${liability.name}' payment recorded. Next due ${new Date(toSave.dueDateMillis).toLocaleDateString('en-IN')}.`,
+          'LIABILITY'
+        );
+      }
+    }
+    await updateCloudLiability(uid, toSave);
+    await get().refreshUserData();
+  },
+
+  settleLiabilityInstallment: async (liabilityId, installmentIndex) => {
+    const liability = get().liabilities.find((item) => item.id === liabilityId);
+    if (!liability) return;
+
+    const schedule = mergeLiabilitySchedule(liability);
+    const installment = schedule[installmentIndex];
+    if (!installment || installment.isPaymentDone) return;
+
+    const previous = liability;
+    const updated = settleInstallmentOnLiability(liability, installmentIndex);
+    await get().updateLiability(updated, previous);
+
+    const email = get().currentUserEmail;
+    const uid = currentUid();
+    if (!email || !uid) return;
+    if (findPlannerLiabilityExpense(get().expenses, liabilityId, installmentIndex)) return;
+
+    const settledSchedule = mergeLiabilitySchedule(updated);
+    const paidInstallment = settledSchedule[installmentIndex];
+    const paymentDateMillis = paidInstallment?.paymentDateMillis ?? Date.now();
+    const amount = paidInstallment?.amount ?? installmentExpenseAmount(updated, installmentIndex);
+
+    await saveCloudExpense(uid, {
+      userEmail: email,
+      title: buildLiabilityInstallmentExpenseTitle(updated, installmentIndex, settledSchedule.length),
+      amount,
+      category: liabilityExpenseCategory(updated),
+      dateMillis: paymentDateMillis,
+      notes: plannerLiabilityExpenseNote(liabilityId, installmentIndex),
+      receiptPath: null,
+    });
+    await addCloudLog(
+      uid,
+      email,
+      'EMI Expense Logged',
+      `Logged ₹${amount.toFixed(2)} for '${updated.name}' installment ${installmentIndex + 1}.`,
+      'EXPENSE'
+    );
     await get().refreshUserData();
   },
 
@@ -526,28 +766,90 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     await get().refreshUserData();
   },
 
-  addSubscription: async (name, cost, cycle, category, isAlertEnabled = true) => {
+  addSubscription: async (name, cost, cycle, category, nextPaymentMillis, isAlertEnabled = true, paymentDateMillis = null) => {
     const email = get().currentUserEmail;
     const uid = currentUid();
     if (!email || !uid) return;
-    await addCloudSubscription(uid, {
+    const dueMillis = normalizeNextPaymentDate(nextPaymentMillis, cycle);
+    const id = await addCloudSubscription(uid, {
       userEmail: email,
       name,
       cost,
       billingCycle: cycle,
-      nextPaymentMillis: Date.now() + 86400000 * 30,
+      nextPaymentMillis: dueMillis,
       category,
       isAlertEnabled,
       isActive: true,
+      lastPaidMillis: null,
+      paymentHistoryJson: '[]',
     });
-    await addCloudLog(uid, email, 'Subscription Tracked', `Subscribed to '${name}' for ₹${cost}/month.`, 'SUBSCRIPTION');
+
+    if (paymentDateMillis != null) {
+      const paidDay = startOfDay(paymentDateMillis);
+      const created: Subscription = {
+        id,
+        userEmail: email,
+        name,
+        cost,
+        billingCycle: cycle,
+        nextPaymentMillis: dueMillis,
+        category,
+        isAlertEnabled,
+        isActive: true,
+        lastPaidMillis: null,
+        paymentHistoryJson: '[]',
+      };
+      const paid = appendSubscriptionPaymentHistory(
+        recordRecurringPayment(created, paidDay),
+        paidDay,
+        cost
+      );
+      await updateCloudSubscription(uid, paid);
+      await syncSubscriptionPaymentExpenses(uid, paid, get().expenses);
+      await addCloudLog(
+        uid,
+        email,
+        'Subscription Paid',
+        `Paid ₹${cost} for '${name}' on ${new Date(paidDay).toLocaleDateString('en-IN')}.`,
+        'SUBSCRIPTION'
+      );
+    }
+
+    await addCloudLog(uid, email, 'Subscription Tracked', `Subscribed to '${name}' for ₹${cost}/${cycle === 'YEARLY' ? 'yr' : 'mo'}. Next due ${new Date(dueMillis).toLocaleDateString('en-IN')}.`, 'SUBSCRIPTION');
     await get().refreshUserData();
   },
 
   updateSubscription: async (sub) => {
     const uid = currentUid();
     if (!uid) return;
-    await updateCloudSubscription(uid, sub);
+    const normalized = {
+      ...sub,
+      nextPaymentMillis: normalizeNextPaymentDate(sub.nextPaymentMillis, sub.billingCycle),
+    };
+    await updateCloudSubscription(uid, normalized);
+    await syncSubscriptionPaymentExpenses(uid, normalized, get().expenses);
+    await get().refreshUserData();
+  },
+
+  recordSubscriptionPayment: async (sub, paymentDateMillis) => {
+    const email = get().currentUserEmail;
+    const uid = currentUid();
+    if (!email || !uid) return;
+    const paidDay = startOfDay(paymentDateMillis);
+    const updated = appendSubscriptionPaymentHistory(
+      recordRecurringPayment(sub, paidDay),
+      paidDay,
+      sub.cost
+    );
+    await updateCloudSubscription(uid, updated);
+    await syncSubscriptionPaymentExpenses(uid, updated, get().expenses);
+    await addCloudLog(
+      uid,
+      email,
+      'Subscription Paid',
+      `Paid ₹${sub.cost} for '${sub.name}' on ${new Date(paidDay).toLocaleDateString('en-IN')}. Next due ${new Date(updated.nextPaymentMillis).toLocaleDateString('en-IN')}.`,
+      'SUBSCRIPTION'
+    );
     await get().refreshUserData();
   },
 
@@ -574,32 +876,104 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   deleteSubscription: async (sub) => {
     const uid = currentUid();
     if (!uid) return;
+    const linked = listSubscriptionPaymentExpenses(get().expenses, sub.id);
+    await Promise.all(linked.map((expense) => deleteCloudExpense(uid, expense.id)));
     await deleteCloudSubscription(uid, sub.id);
     await get().refreshUserData();
   },
 
-  addBill: async (name, amount, cycle, category, isAlertEnabled = true) => {
+  addBill: async (
+    name,
+    amount,
+    cycle,
+    category,
+    nextPaymentMillis,
+    isAlertEnabled = true,
+    paymentDateMillis = null
+  ) => {
     const email = get().currentUserEmail;
     const uid = currentUid();
     if (!email || !uid) return;
-    await addCloudBill(uid, {
+    const dueMillis = normalizeNextPaymentDate(nextPaymentMillis, cycle);
+    const expenseCategory = billExpenseCategory(name) || category || 'Utilities';
+    const id = await addCloudBill(uid, {
       userEmail: email,
       name,
       amount,
       billingCycle: cycle,
-      nextPaymentMillis: Date.now() + 86400000 * 30,
-      category,
+      nextPaymentMillis: dueMillis,
+      category: expenseCategory,
       isAlertEnabled,
       isActive: true,
+      lastPaidMillis: null,
+      paymentHistoryJson: '[]',
     });
-    await addCloudLog(uid, email, 'Bill Tracked', `Bill '${name}' set for ₹${amount} (${cycle.toLowerCase()}).`, 'SYSTEM');
+
+    if (paymentDateMillis != null) {
+      const paidDay = startOfDay(paymentDateMillis);
+      const created: Bill = {
+        id,
+        userEmail: email,
+        name,
+        amount,
+        billingCycle: cycle,
+        nextPaymentMillis: dueMillis,
+        category: expenseCategory,
+        isAlertEnabled,
+        isActive: true,
+        lastPaidMillis: null,
+        paymentHistoryJson: '[]',
+      };
+      const paid = appendBillPaymentHistory(recordRecurringPayment(created, paidDay), paidDay, amount);
+      await updateCloudBill(uid, paid);
+      await syncBillPaymentExpenses(uid, paid, get().expenses);
+      await addCloudLog(
+        uid,
+        email,
+        'Bill Paid',
+        `Paid ₹${amount} for '${name}' on ${new Date(paidDay).toLocaleDateString('en-IN')}.`,
+        'SYSTEM'
+      );
+    }
+
+    await addCloudLog(
+      uid,
+      email,
+      'Bill Tracked',
+      `Bill '${name}' set for ₹${amount} (${cycle.toLowerCase()}). Next due ${new Date(dueMillis).toLocaleDateString('en-IN')}.`,
+      'SYSTEM'
+    );
     await get().refreshUserData();
   },
 
   updateBill: async (bill) => {
     const uid = currentUid();
     if (!uid) return;
-    await updateCloudBill(uid, bill);
+    const normalized = {
+      ...bill,
+      category: billExpenseCategory(bill.name) || bill.category || 'Utilities',
+      nextPaymentMillis: normalizeNextPaymentDate(bill.nextPaymentMillis, bill.billingCycle),
+    };
+    await updateCloudBill(uid, normalized);
+    await syncBillPaymentExpenses(uid, normalized, get().expenses);
+    await get().refreshUserData();
+  },
+
+  recordBillPayment: async (bill, paymentDateMillis) => {
+    const email = get().currentUserEmail;
+    const uid = currentUid();
+    if (!email || !uid) return;
+    const paidDay = startOfDay(paymentDateMillis);
+    const updated = appendBillPaymentHistory(recordRecurringPayment(bill, paidDay), paidDay, bill.amount);
+    await updateCloudBill(uid, updated);
+    await syncBillPaymentExpenses(uid, updated, get().expenses);
+    await addCloudLog(
+      uid,
+      email,
+      'Bill Paid',
+      `Paid ₹${bill.amount} for '${bill.name}' on ${new Date(paidDay).toLocaleDateString('en-IN')}. Next due ${new Date(updated.nextPaymentMillis).toLocaleDateString('en-IN')}.`,
+      'SYSTEM'
+    );
     await get().refreshUserData();
   },
 
@@ -622,6 +996,8 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   deleteBill: async (bill) => {
     const uid = currentUid();
     if (!uid) return;
+    const linked = listBillPaymentExpenses(get().expenses, bill.id);
+    await Promise.all(linked.map((expense) => deleteCloudExpense(uid, expense.id)));
     await deleteCloudBill(uid, bill.id);
     await get().refreshUserData();
   },

@@ -64,34 +64,32 @@ export default function RootLayout() {
     }
   }, [currentUserEmail, initialized, segments, router]);
 
-  if (!loaded || !initialized) {
-    return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: LOGIN_BG }}>
-        <ActivityIndicator size="large" color="#10B981" />
-      </View>
-    );
-  }
-
   return (
     <SafeAreaProvider>
-      <StatusBar
-        barStyle={isOnLogin || isDark ? 'light-content' : 'dark-content'}
-        backgroundColor={isOnLogin ? LOGIN_BG : colors.card}
-        translucent={false}
-      />
       <KeyboardProvider>
-        <Stack screenOptions={{ headerShown: false }}>
-          {/* Login is always dark regardless of system theme */}
-          <Stack.Screen
-            name="login"
-            options={{ contentStyle: { backgroundColor: LOGIN_BG } }}
-          />
-          {/* Tabs follow the system dark/light theme */}
-          <Stack.Screen
-            name="(tabs)"
-            options={{ contentStyle: { backgroundColor: colors.card } }}
-          />
-        </Stack>
+        <StatusBar
+          barStyle={isOnLogin || isDark ? 'light-content' : 'dark-content'}
+          backgroundColor={isOnLogin ? LOGIN_BG : colors.card}
+          translucent={false}
+        />
+        {!loaded || !initialized ? (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: LOGIN_BG }}>
+            <ActivityIndicator size="large" color="#10B981" />
+          </View>
+        ) : (
+          <Stack screenOptions={{ headerShown: false }}>
+            {/* Login is always dark regardless of system theme */}
+            <Stack.Screen
+              name="login"
+              options={{ contentStyle: { backgroundColor: LOGIN_BG } }}
+            />
+            {/* Tabs follow the system dark/light theme */}
+            <Stack.Screen
+              name="(tabs)"
+              options={{ contentStyle: { backgroundColor: colors.card } }}
+            />
+          </Stack>
+        )}
       </KeyboardProvider>
     </SafeAreaProvider>
   );

@@ -2,8 +2,8 @@ import { MaterialIcons } from '@expo/vector-icons';
 import DateTimePicker, { type DateTimePickerChangeEvent } from '@react-native-community/datetimepicker';
 import * as ImagePicker from 'expo-image-picker';
 import { Image } from 'expo-image';
-import { useLocalSearchParams } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -17,12 +17,23 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { KeyboardModalShell } from '@/src/components/KeyboardModalShell';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
 import { useColorScheme } from '@/components/useColorScheme';
 import { EXPENSE_CATEGORIES, FORM_CATEGORIES } from '@/src/constants/categories';
 import { Colors, themeColors } from '@/src/theme/colors';
 import { useFinancialStore } from '@/src/store/useFinancialStore';
 import { formatCurrency, formatDate } from '@/src/utils/format';
+import {
+  EXPENSE_TIME_PERIODS,
+  type ExpenseTimePeriodKey,
+  getExpenseRangeForPeriod,
+  getPeriodMeta,
+  isExpenseInRange,
+  startOfDay,
+} from '@/src/utils/expenseDateRange';
+import { isPlannerLinkedExpense } from '@/src/utils/plannerExpenses';
+import { plannerHref } from '@/src/utils/plannerNavigation';
 import type { Expense } from '@/src/types/models';
 
 const CATEGORY_ICONS: Record<string, string> = {
@@ -30,29 +41,79 @@ const CATEGORY_ICONS: Record<string, string> = {
   Health: '💊', Housing: '🏠', Groceries: '🛒', Borrowing: '🤝', 'Credit-card': '💳', Other: '📦',
 };
 
-const SETTLEMENT_CATEGORIES = new Set(['Borrowing', 'Credit-card']);
+const SETTLEMENT_CATEGORIES = new Set(['Borrowing']);
+const LOAN_PLANNER_CATEGORIES = new Set(['Credit-card', 'Loan-Liability']);
 
-const TIME_FRAMES = [
-  { key: '7d', label: '7 days', days: 7 },
-  { key: '1m', label: '1 month', days: 30 },
-  { key: '3m', label: '3 months', days: 90 },
-  { key: '6m', label: '6 months', days: 180 },
-] as const;
+type ExpenseRowColors = ReturnType<typeof themeColors>;
 
-type TimeFrameKey = (typeof TIME_FRAMES)[number]['key'];
+type ExpenseRowProps = {
+  item: Expense;
+  colors: ExpenseRowColors;
+  showSettlementCheckbox: boolean;
+  onPress: (item: Expense) => void;
+  onLongPress: (item: Expense) => void;
+  onSettlePress: (item: Expense) => void;
+};
 
-function startOfDay(ms: number): number {
-  const d = new Date(ms);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
-function withinTimeFrame(dateMillis: number, days: number): boolean {
-  const cutoff = Date.now() - days * 86_400_000;
-  return dateMillis >= cutoff;
-}
+const ExpenseRow = memo(function ExpenseRow({
+  item,
+  colors,
+  showSettlementCheckbox,
+  onPress,
+  onLongPress,
+  onSettlePress,
+}: ExpenseRowProps) {
+  const plannerLinked = isPlannerLinkedExpense(item);
+  return (
+    <Pressable
+      style={[
+        styles.expenseItem,
+        { backgroundColor: colors.card, borderColor: colors.border },
+        item.isSettled && { opacity: 0.65 },
+        plannerLinked && styles.expenseItemReadonly,
+      ]}
+      onPress={() => onPress(item)}
+      onLongPress={() => onLongPress(item)}
+    >
+      {showSettlementCheckbox ? (
+        <Pressable
+          style={[
+            styles.checkbox,
+            {
+              borderColor: item.isSettled ? colors.primary : colors.border,
+              backgroundColor: item.isSettled ? colors.primary : 'transparent',
+            },
+          ]}
+          onPress={() => onSettlePress(item)}
+          hitSlop={8}
+        >
+          {item.isSettled ? <MaterialIcons name="check" size={16} color="#fff" /> : null}
+        </Pressable>
+      ) : (
+        <Text style={styles.expenseIcon}>{CATEGORY_ICONS[item.category] ?? '📦'}</Text>
+      )}
+      <View style={styles.expenseCopy}>
+        <Text style={[styles.expenseTitle, { color: colors.text }]} numberOfLines={2}>
+          {item.title}
+        </Text>
+        <Text style={{ color: colors.textMuted, fontSize: 12 }} numberOfLines={1}>
+          {item.category} • {formatDate(item.dateMillis)}
+          {plannerLinked ? ' • Planner' : ''}
+        </Text>
+        {item.isSettled && item.settlementDateMillis ? (
+          <Text style={{ color: colors.emeraldText, fontSize: 11, marginTop: 2 }} numberOfLines={2}>
+            Settled {formatDate(item.settlementDateMillis)}
+            {item.settlementNote ? ` — ${item.settlementNote}` : ''}
+          </Text>
+        ) : null}
+      </View>
+      <Text style={[styles.expenseAmt, { color: colors.primary }]}>{formatCurrency(item.amount)}</Text>
+    </Pressable>
+  );
+});
 
 export default function ExpenseScreen() {
+  const router = useRouter();
   const { category: categoryParam } = useLocalSearchParams<{ category?: string }>();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
@@ -66,7 +127,15 @@ export default function ExpenseScreen() {
 
   const [search, setSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
-  const [timeFrame, setTimeFrame] = useState<TimeFrameKey>('1m');
+  const [timePeriod, setTimePeriod] = useState<ExpenseTimePeriodKey>('month');
+  const [customRangeStart, setCustomRangeStart] = useState(() => startOfDay(Date.now() - 30 * 86_400_000));
+  const [customRangeEnd, setCustomRangeEnd] = useState(() => startOfDay(Date.now()));
+  const [showPeriodPicker, setShowPeriodPicker] = useState(false);
+  const [showCustomStartPicker, setShowCustomStartPicker] = useState(false);
+  const [showCustomEndPicker, setShowCustomEndPicker] = useState(false);
+  const [draftPeriod, setDraftPeriod] = useState<ExpenseTimePeriodKey>('month');
+  const [draftCustomStart, setDraftCustomStart] = useState(customRangeStart);
+  const [draftCustomEnd, setDraftCustomEnd] = useState(customRangeEnd);
   const [showAdd, setShowAdd] = useState(false);
   const [editing, setEditing] = useState<Expense | null>(null);
   const [title, setTitle] = useState('');
@@ -94,7 +163,12 @@ export default function ExpenseScreen() {
 
   // Settlement view is when the selected category is a settlement category
   const isSettlementView = SETTLEMENT_CATEGORIES.has(selectedCategory);
-  const activeTimeFrame = TIME_FRAMES.find((t) => t.key === timeFrame) ?? TIME_FRAMES[1];
+  const isLoanPlannerCategory = LOAN_PLANNER_CATEGORIES.has(selectedCategory);
+  const activePeriod = getPeriodMeta(timePeriod);
+  const expenseRange = useMemo(
+    () => getExpenseRangeForPeriod(timePeriod, customRangeStart, customRangeEnd),
+    [timePeriod, customRangeStart, customRangeEnd]
+  );
 
   const categorySpent = useMemo(() => {
     const map = new Map<string, number>();
@@ -106,16 +180,15 @@ export default function ExpenseScreen() {
   }, [expenses]);
 
   const filtered = useMemo(() => {
-    const frameDays = isSettlementView ? activeTimeFrame.days : null;
     return expenses.filter((e) => {
       const matchSearch =
         e.title.toLowerCase().includes(search.toLowerCase()) ||
         e.notes.toLowerCase().includes(search.toLowerCase());
       const matchCat = selectedCategory === 'All' || e.category === selectedCategory;
-      const matchTime = frameDays == null || withinTimeFrame(e.dateMillis, frameDays);
+      const matchTime = isExpenseInRange(e.dateMillis, expenseRange);
       return matchSearch && matchCat && matchTime;
     });
-  }, [expenses, search, selectedCategory, isSettlementView, activeTimeFrame.days]);
+  }, [expenses, search, selectedCategory, expenseRange]);
 
   const totalFiltered = useMemo(
     () => filtered.reduce((s, e) => s + e.amount, 0),
@@ -154,16 +227,26 @@ export default function ExpenseScreen() {
     setShowDatePicker(false);
   };
 
-  const openEdit = (exp: Expense) => {
-    setEditing(exp);
-    setTitle(exp.title);
-    setAmount(String(exp.amount));
-    setCategory(exp.category);
-    setNotes(exp.notes);
-    setExpenseDate(startOfDay(exp.dateMillis));
-    setReceiptUri(exp.receiptPath ?? null);
-    setShowAdd(true);
-  };
+  const openEdit = useCallback(
+    (exp: Expense) => {
+      if (isPlannerLinkedExpense(exp)) {
+        Alert.alert(
+          'Planner expense',
+          'This expense was created from Planner. Edit the subscription or loan in Planner. Long-press to delete it from Expenses.'
+        );
+        return;
+      }
+      setEditing(exp);
+      setTitle(exp.title);
+      setAmount(String(exp.amount));
+      setCategory(exp.category);
+      setNotes(exp.notes);
+      setExpenseDate(startOfDay(exp.dateMillis));
+      setReceiptUri(exp.receiptPath ?? null);
+      setShowAdd(true);
+    },
+    []
+  );
 
   const handleDateValueChange = (_event: DateTimePickerChangeEvent, date: Date) => {
     setExpenseDate(startOfDay(date.getTime()));
@@ -174,6 +257,36 @@ export default function ExpenseScreen() {
     setSettlementDate(startOfDay(date.getTime()));
     if (Platform.OS === 'android') setShowSettlementDatePicker(false);
   };
+
+  const openPeriodPicker = () => {
+    setDraftPeriod(timePeriod);
+    setDraftCustomStart(customRangeStart);
+    setDraftCustomEnd(customRangeEnd);
+    setShowPeriodPicker(true);
+  };
+
+  const applyPeriodSelection = () => {
+    setTimePeriod(draftPeriod);
+    if (draftPeriod === 'custom') {
+      setCustomRangeStart(draftCustomStart);
+      setCustomRangeEnd(draftCustomEnd);
+    }
+    setShowPeriodPicker(false);
+    setShowCustomStartPicker(false);
+    setShowCustomEndPicker(false);
+  };
+
+  const handleDraftCustomStartChange = (_event: DateTimePickerChangeEvent, date: Date) => {
+    setDraftCustomStart(startOfDay(date.getTime()));
+    if (Platform.OS === 'android') setShowCustomStartPicker(false);
+  };
+
+  const handleDraftCustomEndChange = (_event: DateTimePickerChangeEvent, date: Date) => {
+    setDraftCustomEnd(startOfDay(date.getTime()));
+    if (Platform.OS === 'android') setShowCustomEndPicker(false);
+  };
+
+  const periodButtonLabel = timePeriod === 'custom' ? expenseRange.label : activePeriod.shortLabel;
 
   const handleCaptureReceipt = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
@@ -224,13 +337,13 @@ export default function ExpenseScreen() {
     resetForm();
   };
 
-  const openSettlement = (exp: Expense) => {
+  const openSettlement = useCallback((exp: Expense) => {
     if (exp.isSettled) return;
     setSettlingExpense(exp);
     setSettlementNote('');
     setSettlementDate(startOfDay(Date.now()));
     setShowSettlementDatePicker(false);
-  };
+  }, []);
 
   const closeSettlement = () => {
     setSettlingExpense(null);
@@ -255,12 +368,38 @@ export default function ExpenseScreen() {
     closeSettlement();
   };
 
-  const handleDelete = (exp: Expense) => {
-    Alert.alert('Delete expense', `Remove "${exp.title}"?`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => deleteExpense(exp) },
-    ]);
-  };
+  const handleDelete = useCallback(
+    (exp: Expense) => {
+      const plannerLinked = isPlannerLinkedExpense(exp);
+      Alert.alert(
+        'Delete expense',
+        plannerLinked
+          ? `Remove "${exp.title}" from Expenses? The subscription or loan in Planner is not changed.`
+          : `Remove "${exp.title}"?`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Delete', style: 'destructive', onPress: () => deleteExpense(exp) },
+        ]
+      );
+    },
+    [deleteExpense]
+  );
+
+  const renderExpenseItem = useCallback(
+    ({ item }: { item: Expense }) => (
+      <ExpenseRow
+        item={item}
+        colors={colors}
+        showSettlementCheckbox={isSettlementView}
+        onPress={openEdit}
+        onLongPress={handleDelete}
+        onSettlePress={openSettlement}
+      />
+    ),
+    [colors, handleDelete, isSettlementView, openEdit, openSettlement]
+  );
+
+  const expenseKeyExtractor = useCallback((item: Expense) => item.id, []);
 
   const categoryChips = (
     <ScrollView horizontal showsHorizontalScrollIndicator={false} nestedScrollEnabled contentContainerStyle={styles.catRow}>
@@ -317,85 +456,63 @@ export default function ExpenseScreen() {
   const settlementPanel = isSettlementView ? (
     <View style={[styles.settlementCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
       <View style={styles.settlementHeader}>
-        <MaterialIcons name="account-balance-wallet" size={22} color={colors.primary} />
-        <Text style={[styles.settlementTitle, { color: colors.text }]}>{selectedCategory} — Settlement</Text>
+        <MaterialIcons name="handshake" size={22} color={colors.primary} />
+        <Text style={[styles.settlementTitle, { color: colors.text }]}>Informal Borrowing</Text>
       </View>
       <Text style={{ color: colors.textMuted, fontSize: 12, marginBottom: 10 }}>
-        Outstanding in last {activeTimeFrame.label}
+        Peer-to-peer lending only. For loans and EMIs, use Planner → Loans & EMIs.
       </Text>
       <Text style={[styles.settlementTotal, { color: colors.primary }]}>{formatCurrency(outstandingTotal)}</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} nestedScrollEnabled contentContainerStyle={styles.timeRow}>
-        {TIME_FRAMES.map((frame) => (
-          <Pressable
-            key={frame.key}
-            style={[
-              styles.timeChip,
-              { borderColor: colors.border, backgroundColor: colors.surfaceVariant },
-              timeFrame === frame.key && { backgroundColor: Colors.indigo, borderColor: Colors.indigo },
-            ]}
-            onPress={() => setTimeFrame(frame.key)}
-          >
-            <Text style={{ color: timeFrame === frame.key ? '#fff' : colors.text, fontSize: 13, fontWeight: '600' }}>
-              {frame.label}
-            </Text>
-          </Pressable>
-        ))}
-      </ScrollView>
       <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 8 }}>Tap checkbox on an item to record payback</Text>
     </View>
   ) : null;
 
+  const loanPlannerPanel = isLoanPlannerCategory ? (
+    <Pressable
+      style={[styles.settlementCard, { backgroundColor: colors.emeraldSoft, borderColor: colors.border }]}
+      onPress={() =>
+        router.push(plannerHref(selectedCategory === 'Credit-card' ? 'CreditCards' : 'Loans'))
+      }
+    >
+      <View style={styles.settlementHeader}>
+        <MaterialIcons name="account-balance" size={22} color={colors.emeraldText} />
+        <Text style={[styles.settlementTitle, { color: colors.emeraldText }]}>Track in Planner</Text>
+      </View>
+      <Text style={{ color: colors.textMuted, fontSize: 12, lineHeight: 18 }}>
+        {selectedCategory} belongs in Planner — Loans & EMIs or Credit Card Loans — with principal, tenure, rate, and EMI schedule.
+      </Text>
+      <Text style={{ color: colors.primary, fontWeight: '700', fontSize: 13, marginTop: 10 }}>Open Planner →</Text>
+    </Pressable>
+  ) : null;
+
   const totalPanel = (
     <View style={[styles.totalCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-      <Text style={{ color: colors.textMuted, fontSize: 12 }}>
-        {isSettlementView ? `Total (${activeTimeFrame.label})` : 'Filtered Total'}
-      </Text>
-      <Text style={{ color: colors.text, fontSize: 22, fontWeight: '800' }}>{formatCurrency(totalFiltered)}</Text>
-      <Text style={{ color: colors.textMuted, fontSize: 12 }}>{filtered.length} transactions</Text>
-    </View>
-  );
-
-  const renderExpenseItem = ({ item }: { item: Expense }) => (
-    <Pressable
-      style={[
-        styles.expenseItem,
-        { backgroundColor: colors.card, borderColor: colors.border },
-        item.isSettled && { opacity: 0.65 },
-      ]}
-      onPress={() => openEdit(item)}
-      onLongPress={() => handleDelete(item)}
-    >
-      {isSettlementView ? (
-        <Pressable
-          style={[
-            styles.checkbox,
-            {
-              borderColor: item.isSettled ? colors.primary : colors.border,
-              backgroundColor: item.isSettled ? colors.primary : 'transparent',
-            },
-          ]}
-          onPress={() => openSettlement(item)}
-          hitSlop={8}
-        >
-          {item.isSettled ? <MaterialIcons name="check" size={16} color="#fff" /> : null}
-        </Pressable>
-      ) : (
-        <Text style={styles.expenseIcon}>{CATEGORY_ICONS[item.category] ?? '📦'}</Text>
-      )}
-      <View style={{ flex: 1 }}>
-        <Text style={[styles.expenseTitle, { color: colors.text }]}>{item.title}</Text>
-        <Text style={{ color: colors.textMuted, fontSize: 12 }}>
-          {item.category} • {formatDate(item.dateMillis)}
-        </Text>
-        {item.isSettled && item.settlementDateMillis ? (
-          <Text style={{ color: colors.emeraldText, fontSize: 11, marginTop: 2 }}>
-            Settled {formatDate(item.settlementDateMillis)}
-            {item.settlementNote ? ` — ${item.settlementNote}` : ''}
+      <View style={styles.totalCardTop}>
+        <View style={styles.totalCardLeft}>
+          <Text style={{ color: colors.textMuted, fontSize: 12 }}>
+            {isSettlementView ? `Total (${expenseRange.label})` : `Filtered Total · ${expenseRange.label}`}
           </Text>
-        ) : null}
+          <Text style={{ color: colors.text, fontSize: 22, fontWeight: '800' }}>{formatCurrency(totalFiltered)}</Text>
+          <Text style={{ color: colors.textMuted, fontSize: 12 }}>{filtered.length} transactions</Text>
+        </View>
+        <Pressable
+          style={({ pressed }) => [
+            styles.periodBtn,
+            { borderColor: colors.border, backgroundColor: colors.surfaceVariant },
+            pressed && styles.periodBtnPressed,
+          ]}
+          onPress={openPeriodPicker}
+          accessibilityRole="button"
+          accessibilityLabel="Change time period"
+        >
+          <MaterialIcons name="date-range" size={16} color={colors.primary} />
+          <Text style={[styles.periodBtnLabel, { color: colors.text }]} numberOfLines={1}>
+            {periodButtonLabel}
+          </Text>
+          <MaterialIcons name="expand-more" size={18} color={colors.textMuted} />
+        </Pressable>
       </View>
-      <Text style={[styles.expenseAmt, { color: colors.primary }]}>{formatCurrency(item.amount)}</Text>
-    </Pressable>
+    </View>
   );
 
   const emptyList = (
@@ -414,6 +531,7 @@ export default function ExpenseScreen() {
         onChangeText={setSearch}
       />
       {categoryChips}
+      {loanPlannerPanel}
       {settlementPanel}
       {totalPanel}
     </View>
@@ -425,12 +543,17 @@ export default function ExpenseScreen() {
         <FlatList
           style={styles.list}
           data={filtered}
-          keyExtractor={(item) => item.id}
+          keyExtractor={expenseKeyExtractor}
           ListHeaderComponent={settlementScrollHeader}
           contentContainerStyle={styles.listContent}
           keyboardShouldPersistTaps="handled"
           renderItem={renderExpenseItem}
           ListEmptyComponent={emptyList}
+          initialNumToRender={12}
+          maxToRenderPerBatch={10}
+          windowSize={7}
+          removeClippedSubviews={Platform.OS === 'android'}
+          updateCellsBatchingPeriod={50}
         />
       ) : (
         <>
@@ -443,18 +566,24 @@ export default function ExpenseScreen() {
               onChangeText={setSearch}
             />
             {categoryChips}
+            {loanPlannerPanel}
             {budgetStrip}
             {totalPanel}
           </View>
           <View style={[styles.listContainer, { borderColor: colors.border, backgroundColor: colors.card }]}>
             <FlatList
               data={filtered}
-              keyExtractor={(item) => item.id}
+              keyExtractor={expenseKeyExtractor}
               contentContainerStyle={styles.listContainerContent}
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator
               renderItem={renderExpenseItem}
               ListEmptyComponent={emptyList}
+              initialNumToRender={12}
+              maxToRenderPerBatch={10}
+              windowSize={7}
+              removeClippedSubviews={Platform.OS === 'android'}
+              updateCellsBatchingPeriod={50}
             />
           </View>
         </>
@@ -472,8 +601,105 @@ export default function ExpenseScreen() {
         <MaterialIcons name="add" size={28} color="#fff" />
       </Pressable>
 
+      {/* Period filter modal */}
+      <Modal visible={showPeriodPicker} transparent animationType="fade" onRequestClose={() => setShowPeriodPicker(false)}>
+        <Pressable style={styles.periodModalOverlay} onPress={() => setShowPeriodPicker(false)}>
+          <Pressable
+            style={[styles.periodModalCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+            onPress={(e) => e.stopPropagation()}
+          >
+            <View style={styles.periodModalHeader}>
+              <Text style={[styles.periodModalTitle, { color: colors.text }]}>Time Period</Text>
+              <Pressable onPress={() => setShowPeriodPicker(false)} hitSlop={8}>
+                <MaterialIcons name="close" size={22} color={colors.textMuted} />
+              </Pressable>
+            </View>
+            <Text style={[styles.periodModalSubtitle, { color: colors.textMuted }]}>
+              Filter expenses by date range
+            </Text>
+            <View style={styles.periodGrid}>
+              {EXPENSE_TIME_PERIODS.map((period) => {
+                const selected = draftPeriod === period.key;
+                return (
+                  <Pressable
+                    key={period.key}
+                    style={[
+                      styles.periodOption,
+                      { borderColor: colors.border, backgroundColor: colors.surfaceVariant },
+                      selected && { backgroundColor: Colors.indigo, borderColor: Colors.indigo },
+                    ]}
+                    onPress={() => setDraftPeriod(period.key)}
+                  >
+                    <Text
+                      style={[
+                        styles.periodOptionLabel,
+                        { color: selected ? '#fff' : colors.text },
+                      ]}
+                    >
+                      {period.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+            {draftPeriod === 'custom' ? (
+              <View style={[styles.customRangeBox, { borderColor: colors.border, backgroundColor: colors.surfaceVariant }]}>
+                <Text style={[styles.customRangeTitle, { color: colors.text }]}>Custom range</Text>
+                <View style={styles.customRangeRow}>
+                  <Pressable
+                    style={[styles.customDateBtn, { borderColor: colors.border, backgroundColor: colors.card }]}
+                    onPress={() => setShowCustomStartPicker(true)}
+                  >
+                    <Text style={{ color: colors.textMuted, fontSize: 11, fontWeight: '600' }}>From</Text>
+                    <Text style={{ color: colors.text, fontSize: 13, fontWeight: '700', marginTop: 2 }}>
+                      {formatDate(draftCustomStart)}
+                    </Text>
+                  </Pressable>
+                  <MaterialIcons name="arrow-forward" size={18} color={colors.textMuted} />
+                  <Pressable
+                    style={[styles.customDateBtn, { borderColor: colors.border, backgroundColor: colors.card }]}
+                    onPress={() => setShowCustomEndPicker(true)}
+                  >
+                    <Text style={{ color: colors.textMuted, fontSize: 11, fontWeight: '600' }}>To</Text>
+                    <Text style={{ color: colors.text, fontSize: 13, fontWeight: '700', marginTop: 2 }}>
+                      {formatDate(draftCustomEnd)}
+                    </Text>
+                  </Pressable>
+                </View>
+                {showCustomStartPicker ? (
+                  <DateTimePicker
+                    value={new Date(draftCustomStart)}
+                    mode="date"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onValueChange={handleDraftCustomStartChange}
+                    onDismiss={() => setShowCustomStartPicker(false)}
+                  />
+                ) : null}
+                {showCustomEndPicker ? (
+                  <DateTimePicker
+                    value={new Date(draftCustomEnd)}
+                    mode="date"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onValueChange={handleDraftCustomEndChange}
+                    onDismiss={() => setShowCustomEndPicker(false)}
+                  />
+                ) : null}
+              </View>
+            ) : null}
+            <Pressable
+              style={[styles.periodApplyBtn, { backgroundColor: colors.primary }]}
+              onPress={applyPeriodSelection}
+            >
+              <Text style={styles.periodApplyBtnText}>Apply</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {/* Add / Edit expense modal */}
       <Modal visible={showAdd} transparent animationType="fade" onRequestClose={closeModal}>
+        {showAdd ? (
+        <KeyboardModalShell>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: isDark ? colors.card : colors.card, borderColor: colors.border }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>
@@ -562,10 +788,14 @@ export default function ExpenseScreen() {
             </KeyboardAwareScrollView>
           </View>
         </View>
+        </KeyboardModalShell>
+        ) : null}
       </Modal>
 
       {/* Settlement modal */}
       <Modal visible={!!settlingExpense} transparent animationType="fade" onRequestClose={closeSettlement}>
+        {settlingExpense ? (
+        <KeyboardModalShell>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>Record Settlement</Text>
@@ -628,6 +858,8 @@ export default function ExpenseScreen() {
             </KeyboardAwareScrollView>
           </View>
         </View>
+        </KeyboardModalShell>
+        ) : null}
       </Modal>
     </View>
   );
@@ -675,11 +907,62 @@ const styles = StyleSheet.create({
   settlementHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
   settlementTitle: { fontSize: 16, fontWeight: '800' },
   settlementTotal: { fontSize: 26, fontWeight: '800', marginBottom: 10 },
-  timeRow: { gap: 8 },
-  timeChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, borderWidth: 1 },
-  totalCard: { borderRadius: 12, padding: 14, borderWidth: 1, marginBottom: 0 },
+  totalCard: { borderRadius: 14, padding: 14, borderWidth: 1, marginBottom: 0 },
+  totalCardTop: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 },
+  totalCardLeft: { flex: 1, minWidth: 0, gap: 2 },
+  periodBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 20,
+    borderWidth: 1,
+    maxWidth: 130,
+    flexShrink: 0,
+  },
+  periodBtnPressed: { opacity: 0.88, transform: [{ scale: 0.98 }] },
+  periodBtnLabel: { fontSize: 11, fontWeight: '700', flexShrink: 1 },
+  periodModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  periodModalCard: {
+    width: '100%',
+    maxWidth: 400,
+    borderRadius: 20,
+    borderWidth: 1,
+    padding: 18,
+    gap: 12,
+  },
+  periodModalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  periodModalTitle: { fontSize: 18, fontWeight: '800' },
+  periodModalSubtitle: { fontSize: 12, marginTop: -4 },
+  periodGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  periodOption: {
+    width: '48%',
+    flexGrow: 1,
+    minWidth: '46%',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: 'center',
+  },
+  periodOptionLabel: { fontSize: 13, fontWeight: '700' },
+  customRangeBox: { borderRadius: 12, borderWidth: 1, padding: 12, gap: 10 },
+  customRangeTitle: { fontSize: 13, fontWeight: '700' },
+  customRangeRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  customDateBtn: { flex: 1, borderWidth: 1, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 10 },
+  periodApplyBtn: { borderRadius: 12, paddingVertical: 12, alignItems: 'center', marginTop: 4 },
+  periodApplyBtnText: { color: '#fff', fontWeight: '800', fontSize: 15 },
   expenseItem: { flexDirection: 'row', alignItems: 'center', padding: 14, borderRadius: 12, borderWidth: 1, marginBottom: 8, gap: 12 },
+  expenseItemReadonly: { opacity: 0.85 },
   expenseIcon: { fontSize: 24, width: 28, textAlign: 'center' },
+  expenseCopy: { flex: 1, minWidth: 0 },
   checkbox: {
     width: 28,
     height: 28,

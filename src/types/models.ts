@@ -12,6 +12,20 @@ export interface Expense {
   settlementDateMillis?: number | null;
 }
 
+export type LiabilityKind = 'ANNUAL' | 'LOAN' | 'CREDIT_CARD_LOAN';
+export type LoanType =
+  | 'PERSONAL_LOAN'
+  | 'HOME_LOAN'
+  | 'GOLD_LOAN'
+  | 'CAR_LOAN'
+  | 'BIKE_LOAN'
+  | 'EDUCATION_LOAN'
+  | 'BUSINESS_LOAN'
+  | 'AGRICULTURE_LOAN'
+  | 'VEHICLE_LOAN'
+  | 'OTHER'
+  | 'CREDIT_CARD';
+
 export interface Liability {
   id: string;
   userEmail: string;
@@ -22,6 +36,23 @@ export interface Liability {
   isPaid: boolean;
   autoRecalculate: boolean;
   paymentScheduleJson?: string;
+  paymentDateMillis?: number | null;
+  paymentHistoryJson?: string;
+  kind?: LiabilityKind;
+  loanType?: LoanType | null;
+  principal?: number | null;
+  emiAmount?: number | null;
+  tenureMonths?: number | null;
+  interestRatePercent?: number | null;
+  lender?: string | null;
+}
+
+export interface LiabilityPaymentRecord {
+  id: string;
+  dueDateMillis: number;
+  paymentDateMillis: number;
+  amount: number;
+  financialYearLabel: string;
 }
 
 export interface LiabilityInstallment {
@@ -33,6 +64,8 @@ export interface LiabilityInstallment {
   isPaymentDone: boolean;
   paymentDateMillis: number | null;
   isDue: boolean;
+  paymentStatus?: 'pending' | 'done';
+  isOverdue?: boolean;
 }
 
 export interface Subscription {
@@ -46,6 +79,7 @@ export interface Subscription {
   isAlertEnabled: boolean;
   isActive: boolean;
   lastPaidMillis?: number | null;
+  paymentHistoryJson?: string;
 }
 
 export interface Bill {
@@ -59,6 +93,7 @@ export interface Bill {
   isAlertEnabled: boolean;
   isActive: boolean;
   lastPaidMillis?: number | null;
+  paymentHistoryJson?: string;
 }
 
 export interface SavingGoal {

@@ -9,9 +9,9 @@ export const EXPENSE_CATEGORIES = [
   'Health',
   'Savings',
   'Personal',
-  'Borrowing',
-  'Loan-Liability',
-  'Credit-card',
+  'Borrowing', // informal peer lending only — use Planner → Loans for EMIs
+  'Loan-Liability', // expense tag for paid EMIs — register loans in Planner
+  'Credit-card', // one-off card spend — register card loans in Planner
   'Insurance',
   'Groceries',
   'Other',

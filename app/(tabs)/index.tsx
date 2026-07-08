@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Linking,
   Modal,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -14,16 +15,34 @@ import { MaterialIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
+import { LiabilityMonthDetailModal } from '@/src/components/dashboard/LiabilityMonthDetailModal';
+import { AnnualSpendLineChart } from '@/src/components/dashboard/AnnualSpendLineChart';
+import { CategoryMixCard } from '@/src/components/dashboard/CategoryMixCard';
+import { SpendSaveRadialPie } from '@/src/components/dashboard/MiniRadialPie';
 import { useColorScheme } from '@/components/useColorScheme';
 import { useFinancialStore } from '@/src/store/useFinancialStore';
 import { themeColors, Colors } from '@/src/theme/colors';
 import { formatCurrency, formatDate, greeting } from '@/src/utils/format';
-import { getLiabilityRemainingAmount } from '@/src/utils/liabilitySchedule';
-import { computePlannerBreakdown, nextUnpaidLiability } from '@/src/utils/plannerTotals';
+import {
+  getAnnualMonthlySpendTrend,
+  getCurrentMonthExpenseTotal,
+  getLastMonthExpenseSummary,
+  getLastSevenDaysTrend,
+} from '@/src/utils/expenseDateRange';
+import { computeLiabilityInstallmentSummary, computeMonthlyLiabilityTotals, listLoanEmiSummaries, summarizeLoanEmiPayments, type LoanEmiSummary, type MonthlyLiabilityBucket } from '@/src/utils/liabilitySchedule';
+import { computePlannerBreakdown } from '@/src/utils/plannerTotals';
+import {
+  listActiveRecurringPayments,
+  recurringPaymentStatusLabel,
+  summarizeRecurringPayments,
+  wasRecentlyPaid,
+  type RecurringPaymentItem,
+  type RecurringPaymentStatus,
+} from '@/src/utils/recurringBilling';
 import { exportCsv, exportPdfReport } from '@/src/utils/export';
+import { emiSummaryPlannerTab, plannerHref } from '@/src/utils/plannerNavigation';
+import type { PlannerTab } from '@/src/constants/plannerTabs';
 import type { SavingGoal } from '@/src/types/models';
-
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 const TREND_BAR_GRADIENT = ['#6EE7B7', '#34D399', '#059669', '#047857'] as const;
 
@@ -44,6 +63,14 @@ const AUTO_SHEET_GRADIENT = ['#0F766E', '#0D9488', '#14B8A6'] as const;
 
 const NAV_EXPENSES_GRADIENT = ['#9F1239', '#BE123C', '#E11D48'] as const;
 const NAV_PLANNER_GRADIENT = ['#3730A3', '#4F46E5', '#6366F1'] as const;
+
+/** Distinct section identity gradients for dashboard cards */
+const SECTION_EMI_GRADIENT = ['#4C1D95', '#312E81', '#1E1B4B', '#020617'] as const;
+const SECTION_LIABILITY_GRADIENT = ['#9A3412', '#7C2D12', '#431407', '#000000'] as const;
+const SECTION_SUBSCRIPTION_GRADIENT = ['#0E7490', '#155E75', '#164E63', '#082F49'] as const;
+const SECTION_BILLS_GRADIENT = ['#B45309', '#92400E', '#78350F', '#1C1917'] as const;
+const SECTION_PLANNER_GRADIENT = ['#065F46', '#064E3B', '#022C22', '#000000'] as const;
+const SECTION_ANNUAL_GRADIENT = ['#1E3A8A', '#1E40AF', '#172554', '#020617'] as const;
 
 const CATEGORY_GRADIENTS: Record<string, readonly [string, string]> = {
   Utilities: ['#60A5FA', '#2563EB'],
@@ -91,6 +118,8 @@ export default function DashboardScreen() {
   const triggerGmailDelivery = useFinancialStore((s) => s.triggerGmailDelivery);
   const saveGoogleOAuthToken = useFinancialStore((s) => s.saveGoogleOAuthToken);
   const addSavingContribution = useFinancialStore((s) => s.addSavingContribution);
+  const refreshUserData = useFinancialStore((s) => s.refreshUserData);
+  const settleLiabilityInstallment = useFinancialStore((s) => s.settleLiabilityInstallment);
 
   const [showExport, setShowExport] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -99,34 +128,95 @@ export default function DashboardScreen() {
   const [contribGoal, setContribGoal] = useState<SavingGoal | null>(null);
   const [contribAmount, setContribAmount] = useState('');
   const [syncing, setSyncing] = useState(false);
+  const [selectedTrendKey, setSelectedTrendKey] = useState<string | null>(null);
+  const [selectedAnnualKey, setSelectedAnnualKey] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [selectedLiabilityMonth, setSelectedLiabilityMonth] = useState<MonthlyLiabilityBucket | null>(null);
+
+  const refreshDashboard = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await refreshUserData();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refreshUserData]);
 
   useEffect(() => {
     checkAndTriggerPeriodicSync();
   }, [checkAndTriggerPeriodicSync]);
 
-  const totalExpenses = useMemo(() => expenses.reduce((s, e) => s + e.amount, 0), [expenses]);
+  const monthlySpent = useMemo(() => getCurrentMonthExpenseTotal(expenses), [expenses]);
   const monthlyIncome = profile?.monthlyIncome ?? 5000;
-  const percentSpent = Math.min(totalExpenses / monthlyIncome, 1);
-  const remainingBudget = Math.max(monthlyIncome - totalExpenses, 0);
+  const savingsRate = profile?.baseSavingsRatePercent ?? 20;
+  const savingsTarget = monthlyIncome * (savingsRate / 100);
+  const remainingBudget = Math.max(monthlyIncome - monthlySpent, 0);
+  const percentSpent = monthlyIncome > 0 ? Math.min(monthlySpent / monthlyIncome, 1) : 0;
+  const percentRemaining = monthlyIncome > 0 ? Math.max(remainingBudget / monthlyIncome, 0) : 0;
+  const currentMonthLabel = useMemo(
+    () => new Date().toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }),
+    []
+  );
 
-  const nextLiability = useMemo(() => nextUnpaidLiability(liabilities), [liabilities]);
+  const monthlyLiabilityTotals = useMemo(
+    () => computeMonthlyLiabilityTotals(liabilities),
+    [liabilities]
+  );
+  const liabilityInstallmentSummary = useMemo(
+    () => computeLiabilityInstallmentSummary(liabilities),
+    [liabilities]
+  );
+  const currentMonthYear = useMemo(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }, []);
+  const monthlyLiabilityPendingSum = useMemo(
+    () => monthlyLiabilityTotals.reduce((sum, month) => sum + month.pendingTotal, 0),
+    [monthlyLiabilityTotals]
+  );
 
   const plannerBreakdown = useMemo(
     () => computePlannerBreakdown(liabilities, subscriptions, bills),
     [liabilities, subscriptions, bills]
   );
 
-  const trendData = useMemo(() => {
-    const now = Date.now();
-    return DAY_NAMES.map((day, i) => {
-      const dayStart = now - (6 - i) * 86400000;
-      const dayEnd = dayStart + 86400000;
-      const total = expenses.filter((e) => e.dateMillis >= dayStart && e.dateMillis < dayEnd).reduce((s, e) => s + e.amount, 0);
-      return { day, total };
-    });
-  }, [expenses]);
+  const recurringPayments = useMemo(
+    () => listActiveRecurringPayments(subscriptions, bills),
+    [subscriptions, bills]
+  );
+  const subscriptionPayments = useMemo(
+    () => recurringPayments.filter((item) => item.kind === 'subscription'),
+    [recurringPayments]
+  );
+  const billPayments = useMemo(
+    () => recurringPayments.filter((item) => item.kind === 'bill'),
+    [recurringPayments]
+  );
+  const recurringSummary = useMemo(
+    () => summarizeRecurringPayments(subscriptionPayments),
+    [subscriptionPayments]
+  );
+  const billSummary = useMemo(
+    () => summarizeRecurringPayments(billPayments),
+    [billPayments]
+  );
+
+  const emiSummaries = useMemo(() => listLoanEmiSummaries(liabilities), [liabilities]);
+  const emiSummaryStats = useMemo(() => summarizeLoanEmiPayments(emiSummaries), [emiSummaries]);
+  const emiMonthlyTotal = emiSummaryStats.monthlyEmiTotal;
+  const loanRemainingTotal = emiSummaryStats.totalRemaining;
+
+  const trendData = useMemo(() => getLastSevenDaysTrend(expenses), [expenses]);
+  const annualSpendTrend = useMemo(() => getAnnualMonthlySpendTrend(expenses), [expenses]);
+  const maxAnnualSpend = Math.max(...annualSpendTrend.map((d) => d.total), 1);
+  const currentMonthIndex = new Date().getMonth();
 
   const maxTrend = Math.max(...trendData.map((d) => d.total), 1);
+
+  const peakTrendDay = useMemo(() => {
+    if (!trendData.length) return null;
+    return trendData.reduce((best, d) => (d.total > best.total ? d : best), trendData[0]);
+  }, [trendData]);
 
   const categoryTotals = useMemo(() => {
     const map: Record<string, number> = {};
@@ -138,11 +228,6 @@ export default function DashboardScreen() {
     () => categoryTotals.reduce((s, [, amt]) => s + amt, 0),
     [categoryTotals]
   );
-
-  const peakTrendDay = useMemo(() => {
-    if (!trendData.length) return null;
-    return trendData.reduce((best, d) => (d.total > best.total ? d : best), trendData[0]);
-  }, [trendData]);
 
   const mostExpensive = useMemo(() => [...expenses].sort((a, b) => b.amount - a.amount)[0], [expenses]);
 
@@ -159,9 +244,19 @@ export default function DashboardScreen() {
     [expenses]
   );
 
-  const expensesDisplay = totalExpenses > 0 ? formatCurrency(totalExpenses) : '-';
+  const lastMonthExpenseSummary = useMemo(
+    () => getLastMonthExpenseSummary(expenses),
+    [expenses]
+  );
+  const expensesDisplay =
+    lastMonthExpenseSummary.total > 0 ? formatCurrency(lastMonthExpenseSummary.total) : '-';
+  const lastMonthExpenseHint = lastMonthExpenseSummary.hint;
   const plannerCommittedDisplay =
     plannerBreakdown.committedMonthly > 0 ? `${formatCurrency(plannerBreakdown.committedMonthly)}/mo` : '-';
+  const subscriptionDueHint =
+    recurringSummary.dueSoonCount + recurringSummary.overdueCount > 0
+      ? `${recurringSummary.dueSoonCount + recurringSummary.overdueCount} due now`
+      : 'subs + bills / mo';
 
   const handleContribute = async () => {
     if (!contribGoal) return;
@@ -172,8 +267,70 @@ export default function DashboardScreen() {
     setContribAmount('');
   };
 
+  const getMonthStatusMeta = (month: MonthlyLiabilityBucket) => {
+    switch (month.status) {
+      case 'overdue':
+        return { label: 'Overdue', color: colors.error, bg: colors.errorContainer };
+      case 'pending':
+        return { label: 'Pending', color: colors.primary, bg: colors.surfaceVariant };
+      default:
+        return { label: 'Done', color: colors.emeraldText, bg: colors.emeraldSoft };
+    }
+  };
+
+  const getRecurringStatusMeta = (status: RecurringPaymentStatus) => {
+    switch (status) {
+      case 'overdue':
+        return { label: recurringPaymentStatusLabel(status), color: colors.error, bg: colors.errorContainer };
+      case 'due_soon':
+        return { label: recurringPaymentStatusLabel(status), color: colors.primary, bg: colors.surfaceVariant };
+      case 'paid':
+        return { label: recurringPaymentStatusLabel(status), color: colors.emeraldText, bg: colors.emeraldSoft };
+      default:
+        return { label: recurringPaymentStatusLabel(status), color: colors.textMuted, bg: colors.surfaceVariant };
+    }
+  };
+
+  const getEmiStatusMeta = (item: LoanEmiSummary) => {
+    if (item.hasCurrentMonthEmi) {
+      if (item.currentMonthPaid) {
+        return { label: 'Paid', color: colors.emeraldText, bg: colors.emeraldSoft };
+      }
+      if (item.currentMonthOverdue) {
+        return { label: 'Overdue', color: colors.error, bg: colors.errorContainer };
+      }
+      return { label: 'Current Month Due', color: colors.primary, bg: colors.surfaceVariant };
+    }
+    switch (item.status) {
+      case 'overdue':
+        return { label: 'Overdue', color: colors.error, bg: colors.errorContainer };
+      case 'pending':
+        return { label: 'Due', color: colors.primary, bg: colors.surfaceVariant };
+      case 'on_track':
+        return { label: 'On track', color: colors.emeraldText, bg: colors.emeraldSoft };
+      default:
+        return { label: 'Completed', color: colors.textMuted, bg: colors.surfaceVariant };
+    }
+  };
+
+  const goToPlannerTab = (tab: PlannerTab) => {
+    router.push(plannerHref(tab));
+  };
+
   return (
-    <ScrollView style={[styles.container, { backgroundColor: colors.background }]} contentContainerStyle={styles.content}>
+    <ScrollView
+      style={[styles.container, { backgroundColor: colors.background }]}
+      contentContainerStyle={styles.content}
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={refreshDashboard}
+          tintColor={colors.primary}
+          colors={[colors.primary]}
+          progressBackgroundColor={colors.card}
+        />
+      }
+    >
       <View style={styles.header}>
         <Text style={[styles.archLabel, { color: colors.primary }]}>PERSONAL EXPENXER</Text>
         <View style={styles.headerRow}>
@@ -209,15 +366,145 @@ export default function DashboardScreen() {
         </View>
       </View>
 
-      {/* Hero Card */}
-      <View style={[styles.heroCard, { backgroundColor: Colors.secondaryBlue }]}>
-        <Text style={styles.heroLabel}>MONTHLY SAVINGS TARGET</Text>
-        <Text style={styles.heroAmount}>{formatCurrency(monthlyIncome * ((profile?.baseSavingsRatePercent ?? 20) / 100))}</Text>
-        <Text style={styles.heroSub}>Spent {formatCurrency(totalExpenses)} of {formatCurrency(monthlyIncome)} income</Text>
-        <View style={styles.progressTrack}>
-          <View style={[styles.progressFill, { width: `${percentSpent * 100}%`, backgroundColor: Colors.accentGreen }]} />
-        </View>
-        <Text style={styles.heroRemaining}>{formatCurrency(remainingBudget)} remaining this cycle</Text>
+      <View style={styles.heroStack}>
+        <LinearGradient
+          colors={['#0B3A6E', '#0A2748', '#061525', '#000000']}
+          locations={[0, 0.35, 0.7, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.heroCard}
+        >
+          <View style={styles.heroHeaderRow}>
+            <View style={[styles.heroIconWrap, styles.savingsHeroIcon]}>
+              <MaterialIcons name="savings" size={22} color="#A5F3FC" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.heroLabel, styles.savingsHeroLabel]}>MONTHLY SAVINGS TARGET</Text>
+              <Text style={[styles.heroSub, styles.savingsHeroSub]}>
+                {currentMonthLabel} · {savingsRate}% of {formatCurrency(monthlyIncome)}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.heroAmount}>{formatCurrency(savingsTarget)}</Text>
+          <View style={[styles.progressTrack, styles.savingsProgressTrack, styles.splitProgressTrack]}>
+            {percentSpent > 0.001 ? (
+              <LinearGradient
+                colors={['#0C4A6E', '#075985', '#164E63']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={[styles.progressFill, {
+                  width: `${percentSpent * 100}%`,
+                  borderTopRightRadius: percentRemaining > 0.001 ? 0 : 4,
+                  borderBottomRightRadius: percentRemaining > 0.001 ? 0 : 4,
+                }]}
+              />
+            ) : null}
+            {percentRemaining > 0.001 ? (
+              <LinearGradient
+                colors={['#083344', '#0E7490', '#155E75']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={[styles.progressFill, {
+                  width: `${percentRemaining * 100}%`,
+                  borderTopLeftRadius: percentSpent > 0.001 ? 0 : 4,
+                  borderBottomLeftRadius: percentSpent > 0.001 ? 0 : 4,
+                }]}
+              />
+            ) : null}
+          </View>
+          <View style={styles.heroLegendRow}>
+            <View style={styles.heroLegendItem}>
+              <View style={[styles.heroLegendDot, { backgroundColor: '#0E7490' }]} />
+              <Text style={[styles.heroRemaining, styles.savingsHeroRemaining, { marginTop: 0 }]}>
+                Spent {formatCurrency(monthlySpent)}
+              </Text>
+            </View>
+            <View style={styles.heroLegendItem}>
+              <View style={[styles.heroLegendDot, { backgroundColor: '#67E8F9' }]} />
+              <Text style={[styles.heroRemaining, styles.savingsHeroRemaining, { marginTop: 0 }]}>
+                Remaining {formatCurrency(remainingBudget)}
+              </Text>
+            </View>
+          </View>
+          <Text style={[styles.heroRemaining, styles.savingsHeroRemaining]}>
+            Aim to keep ≥ {formatCurrency(savingsTarget)} unspent this month
+          </Text>
+        </LinearGradient>
+
+        <LinearGradient
+          colors={['#9F1239', '#7F1D1D', '#450A0A', '#000000']}
+          locations={[0, 0.32, 0.68, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.heroCard}
+        >
+          <View style={styles.heroHeaderRow}>
+            <View style={[styles.heroIconWrap, styles.spendHeroIcon]}>
+              <MaterialIcons name="account-balance-wallet" size={22} color="#FECDD3" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.heroLabel, styles.spendHeroLabel]}>CURRENT MONTH EXPENDITURE</Text>
+              <Text style={[styles.heroSub, styles.spendHeroSub]}>
+                {currentMonthLabel}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.spendMidRow}>
+            <SpendSaveRadialPie spent={monthlySpent} remaining={remainingBudget} size={96} />
+            <View style={styles.spendAmountBlock}>
+              <Text style={styles.spendAboveLabel}>Spent</Text>
+              <Text
+                style={styles.spendAmountValue}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.7}
+              >
+                {formatCurrency(monthlySpent)}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.spendSaveRow}>
+            <View style={styles.spendSaveRight}>
+              <View style={[styles.heroLegendDot, { backgroundColor: '#10B981' }]} />
+              <Text style={styles.spendSaveLabel}>Saving</Text>
+              <Text style={[styles.spendSaveValue, styles.spendSaveValueRight]} numberOfLines={2}>
+                {formatCurrency(remainingBudget)}
+              </Text>
+            </View>
+          </View>
+
+          <View style={[styles.progressTrack, styles.spendProgressTrack, styles.splitProgressTrack]}>
+            {percentSpent > 0.001 ? (
+              <LinearGradient
+                colors={['#4C0519', '#9F1239', '#BE123C']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={[styles.progressFill, {
+                  width: `${percentSpent * 100}%`,
+                  borderTopRightRadius: percentRemaining > 0.001 ? 0 : 4,
+                  borderBottomRightRadius: percentRemaining > 0.001 ? 0 : 4,
+                }]}
+              />
+            ) : null}
+            {percentRemaining > 0.001 ? (
+              <LinearGradient
+                colors={['#022C22', '#064E3B', '#065F46']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={[styles.progressFill, {
+                  width: `${percentRemaining * 100}%`,
+                  borderTopLeftRadius: percentSpent > 0.001 ? 0 : 4,
+                  borderBottomLeftRadius: percentSpent > 0.001 ? 0 : 4,
+                }]}
+              />
+            ) : null}
+          </View>
+          <Text style={[styles.heroRemaining, styles.spendHeroSub, { marginTop: 8 }]}>
+            {formatCurrency(remainingBudget)} left of {formatCurrency(monthlyIncome)} income
+          </Text>
+        </LinearGradient>
       </View>
 
       {pendingBorrowing > 0 && (
@@ -250,28 +537,519 @@ export default function DashboardScreen() {
         </Pressable>
       )}
 
-      <View style={styles.bentoRow}>
-        <View style={[styles.bentoCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <Text style={[styles.bentoLabel, { color: colors.textMuted }]}>✨ AI Coach</Text>
-          <Text style={[styles.bentoText, { color: colors.text }]}>Reduce 'Subscriptions' to unlock ₹18/mo in extra savings.</Text>
-        </View>
-        <View style={[styles.bentoCard, { backgroundColor: colors.emeraldSoft, borderColor: isDark ? '#047857' : '#D1FAE5' }]}>
-          <Text style={[styles.liabilityLabel, { color: colors.emeraldText }]}>NEXT LIABILITY</Text>
-          {nextLiability ? (
-            <>
-              <Text style={[styles.liabilityName, { color: isDark ? '#fff' : Colors.secondaryBlue }]}>{nextLiability.name}</Text>
-              <Text style={{ color: colors.emeraldText, fontWeight: '600', fontSize: 12 }}>
-                {formatDate(nextLiability.dueDateMillis)} • {formatCurrency(getLiabilityRemainingAmount(nextLiability))} left
+      {emiSummaries.length > 0 && (
+        <LinearGradient
+          colors={[...SECTION_EMI_GRADIENT]}
+          locations={[0, 0.3, 0.65, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={[styles.liabilityMonthCard, styles.sectionGradientCard]}
+        >
+          <View style={styles.liabilityMonthHeader}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.liabilityMonthTitle, styles.sectionOnDark]}>Loans & EMIs</Text>
+              <Text style={[styles.sectionMuted, { fontSize: 12, marginTop: 2 }]}>
+                Bank loans and credit card EMI plans
               </Text>
-            </>
-          ) : (
-            <>
-              <Text style={[styles.liabilityName, { color: isDark ? '#fff' : Colors.secondaryBlue }]}>All Clear</Text>
-              <Text style={{ color: colors.textMuted, fontSize: 12 }}>No pending bills</Text>
-            </>
-          )}
+            </View>
+            <Pressable
+              onPress={() => goToPlannerTab('Loans')}
+              style={({ pressed }) => [styles.liabilityMonthLink, pressed && { opacity: 0.8 }]}
+            >
+              <Text style={[styles.sectionLink, { fontWeight: '700', fontSize: 12 }]}>Planner</Text>
+              <MaterialIcons name="chevron-right" size={18} color="#FDE68A" />
+            </Pressable>
+          </View>
+
+          <View style={styles.emiSummaryRow}>
+            <View style={[styles.emiSummaryCard, styles.sectionGlass]}>
+              <View style={[styles.emiSummaryIcon, { backgroundColor: 'rgba(167,139,250,0.22)' }]}>
+                <MaterialIcons name="account-balance-wallet" size={18} color="#C4B5FD" />
+              </View>
+              <Text style={[styles.emiSummaryLabel, styles.sectionMuted]} numberOfLines={1}>
+                Total Remaining
+              </Text>
+              <Text style={[styles.emiSummaryValue, styles.sectionOnDark]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
+                {formatCurrency(loanRemainingTotal)}
+              </Text>
+            </View>
+            <View style={[styles.emiSummaryCard, styles.sectionGlass]}>
+              <View style={[styles.emiSummaryIcon, { backgroundColor: 'rgba(52,211,153,0.22)' }]}>
+                <MaterialIcons name="event-repeat" size={18} color="#6EE7B7" />
+              </View>
+              <Text style={[styles.emiSummaryLabel, styles.sectionMuted]} numberOfLines={1}>
+                EMI / Month
+              </Text>
+              <Text style={[styles.emiSummaryValue, { color: '#6EE7B7' }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
+                {formatCurrency(emiMonthlyTotal)}
+              </Text>
+            </View>
+          </View>
+
+          <Text style={[styles.sectionMuted, { fontSize: 11, textAlign: 'center' }]}>
+            {emiSummaries.length} active plan{emiSummaries.length === 1 ? '' : 's'}
+          </Text>
+
+          <View style={[styles.liabilityMonthStatsRow, styles.sectionGlass]}>
+            <View style={styles.liabilityMonthStat}>
+              <Text style={[styles.sectionMuted, { fontSize: 11, fontWeight: '600' }]}>Due</Text>
+              <Text style={{ color: '#67E8F9', fontWeight: '800', fontSize: 16, marginTop: 2 }}>
+                {emiSummaryStats.dueCount}
+              </Text>
+            </View>
+            <View style={[styles.liabilityMonthStatDivider, { backgroundColor: 'rgba(255,255,255,0.2)' }]} />
+            <View style={styles.liabilityMonthStat}>
+              <Text style={[styles.sectionMuted, { fontSize: 11, fontWeight: '600' }]}>Overdue</Text>
+              <Text style={{ color: '#FB7185', fontWeight: '800', fontSize: 16, marginTop: 2 }}>
+                {emiSummaryStats.overdueCount}
+              </Text>
+            </View>
+            <View style={[styles.liabilityMonthStatDivider, { backgroundColor: 'rgba(255,255,255,0.2)' }]} />
+            <View style={styles.liabilityMonthStat}>
+              <Text style={[styles.sectionMuted, { fontSize: 11, fontWeight: '600' }]}>Paid</Text>
+              <Text style={{ color: '#6EE7B7', fontWeight: '800', fontSize: 16, marginTop: 2 }}>
+                {emiSummaryStats.paidCount}
+              </Text>
+            </View>
+          </View>
+
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            nestedScrollEnabled
+            contentContainerStyle={styles.liabilityMonthRow}
+          >
+            {emiSummaries.map((item) => {
+              const statusMeta = getEmiStatusMeta(item);
+              return (
+                <Pressable
+                  key={item.liabilityId}
+                  style={({ pressed }) => [
+                    styles.emiLoanItem,
+                    styles.sectionItemGlass,
+                    {
+                      borderColor: statusMeta.color,
+                      opacity: pressed ? 0.88 : 1,
+                    },
+                  ]}
+                  onPress={() => goToPlannerTab(emiSummaryPlannerTab(item))}
+                >
+                  <View style={styles.emiLoanItemTop}>
+                    <Text style={[styles.emiLoanItemLabel, styles.sectionOnDark]} numberOfLines={1}>
+                      {item.name}
+                    </Text>
+                    <View style={[styles.emiLoanStatusBadge, { backgroundColor: statusMeta.color }]}>
+                      <Text style={styles.emiLoanStatusText}>{statusMeta.label}</Text>
+                    </View>
+                  </View>
+                  <Text style={[styles.emiLoanItemMeta, styles.sectionMuted]} numberOfLines={1}>
+                    {item.kindLabel} · {item.paidCount}/{item.tenureMonths}
+                  </Text>
+                  <Text style={[styles.emiLoanItemAmount, { color: statusMeta.color }]} numberOfLines={1}>
+                    {formatCurrency(item.hasCurrentMonthEmi ? item.currentMonthAmount : item.emiAmount)}
+                  </Text>
+                  <Text style={[styles.emiLoanItemSub, styles.sectionMuted]} numberOfLines={2}>
+                    {item.hasCurrentMonthEmi && item.currentMonthPaid && item.currentMonthPaidMillis
+                      ? `Paid ${formatDate(item.currentMonthPaidMillis)}`
+                      : item.hasCurrentMonthEmi && item.currentMonthDueMillis
+                        ? `Due ${formatDate(item.currentMonthDueMillis)}`
+                        : item.nextDueMillis
+                          ? `Next ${formatDate(item.nextDueMillis)}`
+                          : `Left ${formatCurrency(item.remainingAmount)}`}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </LinearGradient>
+      )}
+
+      <LinearGradient
+        colors={[...SECTION_LIABILITY_GRADIENT]}
+        locations={[0, 0.3, 0.65, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[styles.liabilityMonthCard, styles.sectionGradientCard]}
+      >
+        <View style={styles.liabilityMonthHeader}>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.liabilityMonthTitle, styles.sectionOnDark]}>Liability Per Month</Text>
+            <Text style={[styles.sectionMuted, { fontSize: 12, marginTop: 2 }]}>
+              Annual liabilities and loan EMIs
+            </Text>
+          </View>
+          <Pressable
+            onPress={() => goToPlannerTab('Liabilities')}
+            style={({ pressed }) => [styles.liabilityMonthLink, pressed && { opacity: 0.8 }]}
+          >
+            <Text style={[styles.sectionLink, { fontWeight: '700', fontSize: 12 }]}>Planner</Text>
+            <MaterialIcons name="chevron-right" size={18} color="#FDE68A" />
+          </Pressable>
         </View>
+
+        {monthlyLiabilityTotals.length > 0 ? (
+          <>
+            <View style={[styles.liabilityMonthStatsRow, styles.sectionGlass]}>
+              <View style={styles.liabilityMonthStat}>
+                <Text style={[styles.sectionMuted, { fontSize: 11, fontWeight: '600' }]}>Overdue</Text>
+                <Text style={{ color: '#FB7185', fontWeight: '800', fontSize: 16, marginTop: 2 }}>
+                  {liabilityInstallmentSummary.overdueCount}
+                </Text>
+              </View>
+              <View style={[styles.liabilityMonthStatDivider, { backgroundColor: 'rgba(255,255,255,0.2)' }]} />
+              <View style={styles.liabilityMonthStat}>
+                <Text style={[styles.sectionMuted, { fontSize: 11, fontWeight: '600' }]}>Pending</Text>
+                <Text style={[styles.sectionOnDark, { fontWeight: '800', fontSize: 16, marginTop: 2 }]}>
+                  {liabilityInstallmentSummary.pendingCount}
+                </Text>
+              </View>
+              <View style={[styles.liabilityMonthStatDivider, { backgroundColor: 'rgba(255,255,255,0.2)' }]} />
+              <View style={styles.liabilityMonthStat}>
+                <Text style={[styles.sectionMuted, { fontSize: 11, fontWeight: '600' }]}>Done</Text>
+                <Text style={{ color: '#6EE7B7', fontWeight: '800', fontSize: 16, marginTop: 2 }}>
+                  {liabilityInstallmentSummary.doneCount}
+                </Text>
+              </View>
+            </View>
+            <View style={[styles.liabilityMonthTotalRow, styles.sectionGlass]}>
+              <Text style={{ color: '#FDBA74', fontWeight: '600', fontSize: 12 }}>Unpaid liability total</Text>
+              <Text style={{ color: '#FED7AA', fontWeight: '800', fontSize: 16 }}>
+                {formatCurrency(monthlyLiabilityPendingSum)}
+              </Text>
+            </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              nestedScrollEnabled
+              contentContainerStyle={styles.liabilityMonthRow}
+            >
+              {monthlyLiabilityTotals.map((month) => {
+                const isCurrent = month.monthYear === currentMonthYear;
+                const statusMeta = getMonthStatusMeta(month);
+                return (
+                  <Pressable
+                    key={month.monthYear}
+                    style={({ pressed }) => [
+                      styles.liabilityMonthItem,
+                      styles.sectionItemGlass,
+                      {
+                        borderColor: statusMeta.color,
+                        opacity: pressed ? 0.88 : 1,
+                      },
+                      isCurrent && { borderWidth: 2 },
+                    ]}
+                    onPress={() => setSelectedLiabilityMonth(month)}
+                  >
+                    <View style={styles.liabilityMonthItemTop}>
+                      <Text
+                        style={[
+                          styles.liabilityMonthLabel,
+                          { color: isCurrent ? '#FDE68A' : 'rgba(255,255,255,0.7)' },
+                        ]}
+                      >
+                        {month.label}
+                      </Text>
+                      <View style={[styles.liabilityMonthStatusBadge, { backgroundColor: statusMeta.color }]}>
+                        <Text style={styles.liabilityMonthStatusText}>{statusMeta.label}</Text>
+                      </View>
+                    </View>
+                    <Text style={[styles.liabilityMonthAmount, { color: statusMeta.color }]}>
+                      {formatCurrency(month.total)}
+                    </Text>
+                    <Text style={[styles.sectionMuted, { fontSize: 10, marginTop: 4 }]}>
+                      {month.status === 'overdue'
+                        ? `${month.overdueCount} overdue`
+                        : month.status === 'pending'
+                          ? `${month.pendingCount} pending`
+                          : `${month.doneCount} paid`}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </>
+        ) : (
+          <View style={[styles.liabilityMonthEmpty, styles.sectionEmpty]}>
+            <MaterialIcons name="event-note" size={22} color="rgba(255,255,255,0.65)" />
+            <Text style={[styles.sectionMuted, { fontSize: 13, flex: 1 }]}>
+              No monthly liabilities scheduled. Add annual liabilities and set up payment plans in Planner.
+            </Text>
+          </View>
+        )}
+      </LinearGradient>
+
+      <LinearGradient
+        colors={[...SECTION_SUBSCRIPTION_GRADIENT]}
+        locations={[0, 0.3, 0.65, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[styles.liabilityMonthCard, styles.sectionGradientCard]}
+      >
+        <View style={styles.liabilityMonthHeader}>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.liabilityMonthTitle, styles.sectionOnDark]}>Subscription Payments</Text>
+            <Text style={[styles.sectionMuted, { fontSize: 12, marginTop: 2 }]}>
+              Due dates and payment window from Planner
+            </Text>
+          </View>
+          <Pressable
+            onPress={() => goToPlannerTab('Subscriptions')}
+            style={({ pressed }) => [styles.liabilityMonthLink, pressed && { opacity: 0.8 }]}
+          >
+            <Text style={[styles.sectionLink, { fontWeight: '700', fontSize: 12 }]}>Planner</Text>
+            <MaterialIcons name="chevron-right" size={18} color="#FDE68A" />
+          </Pressable>
+        </View>
+
+        {subscriptionPayments.length > 0 ? (
+          <>
+            <View style={[styles.liabilityMonthStatsRow, styles.sectionGlass]}>
+              <View style={styles.liabilityMonthStat}>
+                <Text style={[styles.sectionMuted, { fontSize: 11, fontWeight: '600' }]}>Due soon</Text>
+                <Text style={{ color: '#67E8F9', fontWeight: '800', fontSize: 16, marginTop: 2 }}>
+                  {recurringSummary.dueSoonCount}
+                </Text>
+              </View>
+              <View style={[styles.liabilityMonthStatDivider, { backgroundColor: 'rgba(255,255,255,0.2)' }]} />
+              <View style={styles.liabilityMonthStat}>
+                <Text style={[styles.sectionMuted, { fontSize: 11, fontWeight: '600' }]}>Overdue</Text>
+                <Text style={{ color: '#FB7185', fontWeight: '800', fontSize: 16, marginTop: 2 }}>
+                  {recurringSummary.overdueCount}
+                </Text>
+              </View>
+              <View style={[styles.liabilityMonthStatDivider, { backgroundColor: 'rgba(255,255,255,0.2)' }]} />
+              <View style={styles.liabilityMonthStat}>
+                <Text style={[styles.sectionMuted, { fontSize: 11, fontWeight: '600' }]}>Paid</Text>
+                <Text style={{ color: '#6EE7B7', fontWeight: '800', fontSize: 16, marginTop: 2 }}>
+                  {subscriptionPayments.filter((i) => i.status === 'paid' || wasRecentlyPaid(i.lastPaidMillis)).length}
+                </Text>
+              </View>
+            </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              nestedScrollEnabled
+              contentContainerStyle={styles.liabilityMonthRow}
+            >
+              {subscriptionPayments.map((item: RecurringPaymentItem) => {
+                const recentlyPaid = item.status === 'paid' || wasRecentlyPaid(item.lastPaidMillis);
+                const displayStatus = recentlyPaid ? 'paid' : item.status;
+                const statusMeta = getRecurringStatusMeta(displayStatus);
+                return (
+                  <Pressable
+                    key={item.id}
+                    style={({ pressed }) => [
+                      styles.liabilityMonthItem,
+                      styles.sectionItemGlass,
+                      {
+                        borderColor: statusMeta.color,
+                        opacity: pressed ? 0.88 : 1,
+                      },
+                    ]}
+                    onPress={() => goToPlannerTab('Subscriptions')}
+                  >
+                    <View style={styles.liabilityMonthItemTop}>
+                      <Text style={[styles.liabilityMonthLabel, styles.sectionOnDark]} numberOfLines={1}>
+                        {item.name}
+                      </Text>
+                      <View style={[styles.liabilityMonthStatusBadge, { backgroundColor: statusMeta.color }]}>
+                        <Text style={styles.liabilityMonthStatusText}>{statusMeta.label}</Text>
+                      </View>
+                    </View>
+                    <Text style={[styles.liabilityMonthAmount, { color: statusMeta.color }]}>
+                      {formatCurrency(item.amount)}
+                    </Text>
+                    <Text style={[styles.sectionMuted, { fontSize: 10, marginTop: 4 }]} numberOfLines={1}>
+                      {recentlyPaid && item.lastPaidMillis
+                        ? `Paid ${formatDate(item.lastPaidMillis)} • Next ${formatDate(item.nextPaymentMillis)}`
+                        : `Due ${formatDate(item.nextPaymentMillis)}`}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </>
+        ) : (
+          <View style={[styles.liabilityMonthEmpty, styles.sectionEmpty]}>
+            <MaterialIcons name="subscriptions" size={22} color="rgba(255,255,255,0.65)" />
+            <Text style={[styles.sectionMuted, { fontSize: 13, flex: 1 }]}>
+              No active subscriptions. Add one in Planner with a billing due date.
+            </Text>
+          </View>
+        )}
+      </LinearGradient>
+
+      <LinearGradient
+        colors={[...SECTION_BILLS_GRADIENT]}
+        locations={[0, 0.3, 0.65, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[styles.liabilityMonthCard, styles.sectionGradientCard]}
+      >
+        <View style={styles.liabilityMonthHeader}>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.liabilityMonthTitle, styles.sectionOnDark]}>Monthly Bills</Text>
+            <Text style={[styles.sectionMuted, { fontSize: 12, marginTop: 2 }]}>
+              Current cycle — amount, due date & pay status
+            </Text>
+          </View>
+          <Pressable
+            onPress={() => goToPlannerTab('Bills')}
+            style={({ pressed }) => [styles.liabilityMonthLink, pressed && { opacity: 0.8 }]}
+          >
+            <Text style={[styles.sectionLink, { fontWeight: '700', fontSize: 12 }]}>Planner</Text>
+            <MaterialIcons name="chevron-right" size={18} color="#FDE68A" />
+          </Pressable>
+        </View>
+
+        {billPayments.length > 0 ? (
+          <>
+            <View style={[styles.liabilityMonthStatsRow, styles.sectionGlass]}>
+              <View style={styles.liabilityMonthStat}>
+                <Text style={[styles.sectionMuted, { fontSize: 11, fontWeight: '600' }]}>Due soon</Text>
+                <Text style={{ color: '#FCD34D', fontWeight: '800', fontSize: 16, marginTop: 2 }}>
+                  {billSummary.dueSoonCount}
+                </Text>
+              </View>
+              <View style={[styles.liabilityMonthStatDivider, { backgroundColor: 'rgba(255,255,255,0.2)' }]} />
+              <View style={styles.liabilityMonthStat}>
+                <Text style={[styles.sectionMuted, { fontSize: 11, fontWeight: '600' }]}>Overdue</Text>
+                <Text style={{ color: '#FB7185', fontWeight: '800', fontSize: 16, marginTop: 2 }}>
+                  {billSummary.overdueCount}
+                </Text>
+              </View>
+              <View style={[styles.liabilityMonthStatDivider, { backgroundColor: 'rgba(255,255,255,0.2)' }]} />
+              <View style={styles.liabilityMonthStat}>
+                <Text style={[styles.sectionMuted, { fontSize: 11, fontWeight: '600' }]}>Paid</Text>
+                <Text style={{ color: '#6EE7B7', fontWeight: '800', fontSize: 16, marginTop: 2 }}>
+                  {billPayments.filter((i) => i.status === 'paid' || wasRecentlyPaid(i.lastPaidMillis)).length}
+                </Text>
+              </View>
+            </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              nestedScrollEnabled
+              contentContainerStyle={styles.liabilityMonthRow}
+            >
+              {billPayments.map((item: RecurringPaymentItem) => {
+                const recentlyPaid = item.status === 'paid' || wasRecentlyPaid(item.lastPaidMillis);
+                const displayStatus = recentlyPaid ? 'paid' : item.status;
+                const statusMeta = getRecurringStatusMeta(displayStatus);
+                return (
+                  <Pressable
+                    key={item.id}
+                    style={({ pressed }) => [
+                      styles.liabilityMonthItem,
+                      styles.sectionItemGlass,
+                      {
+                        borderColor: statusMeta.color,
+                        opacity: pressed ? 0.88 : 1,
+                      },
+                    ]}
+                    onPress={() => goToPlannerTab('Bills')}
+                  >
+                    <View style={styles.liabilityMonthItemTop}>
+                      <Text style={[styles.liabilityMonthLabel, styles.sectionOnDark]} numberOfLines={1}>
+                        {item.name}
+                      </Text>
+                      <View style={[styles.liabilityMonthStatusBadge, { backgroundColor: statusMeta.color }]}>
+                        <Text style={styles.liabilityMonthStatusText}>{statusMeta.label}</Text>
+                      </View>
+                    </View>
+                    <Text style={[styles.liabilityMonthAmount, { color: statusMeta.color }]}>
+                      {formatCurrency(item.amount)}
+                    </Text>
+                    <Text style={[styles.sectionMuted, { fontSize: 10, marginTop: 4 }]} numberOfLines={1}>
+                      {recentlyPaid && item.lastPaidMillis
+                        ? `Paid ${formatDate(item.lastPaidMillis)} • Next ${formatDate(item.nextPaymentMillis)}`
+                        : `Due ${formatDate(item.nextPaymentMillis)}`}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </>
+        ) : (
+          <View style={[styles.liabilityMonthEmpty, styles.sectionEmpty]}>
+            <MaterialIcons name="receipt-long" size={22} color="rgba(255,255,255,0.65)" />
+            <Text style={[styles.sectionMuted, { fontSize: 13, flex: 1 }]}>
+              No active bills this cycle. Add rent, utilities, or school fees in Planner.
+            </Text>
+          </View>
+        )}
+      </LinearGradient>
+
+      <LinearGradient
+        colors={[...SECTION_ANNUAL_GRADIENT]}
+        locations={[0, 0.28, 0.65, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[styles.liabilityMonthCard, styles.sectionGradientCard]}
+      >
+        <View style={styles.liabilityMonthHeader}>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.liabilityMonthTitle, styles.sectionOnDark]}>
+              Annual Expenditure · {new Date().getFullYear()}
+            </Text>
+            <Text style={[styles.sectionMuted, { fontSize: 12, marginTop: 2 }]}>
+              Line chart · month-by-month spend
+            </Text>
+          </View>
+          <Pressable
+            onPress={() => router.push('/(tabs)/expenses')}
+            style={({ pressed }) => [styles.liabilityMonthLink, pressed && { opacity: 0.8 }]}
+          >
+            <Text style={[styles.sectionLink, { fontWeight: '700', fontSize: 12 }]}>Expenses</Text>
+            <MaterialIcons name="chevron-right" size={18} color="#FDE68A" />
+          </Pressable>
+        </View>
+
+        <AnnualSpendLineChart
+          data={annualSpendTrend}
+          selectedKey={selectedAnnualKey}
+          currentMonthIndex={currentMonthIndex}
+          maxTotal={maxAnnualSpend}
+          onSelect={setSelectedAnnualKey}
+        />
+      </LinearGradient>
+
+      <CategoryMixCard categories={categoryTotals} total={categoryTotalSum} />
+
+      {/* Quick Nav for viewing Expense and Monthly Bill */}
+      <View style={styles.actionRow}>
+        <Pressable
+          style={({ pressed }) => [styles.navCardWrap, pressed && styles.actionCardPressed]}
+          onPress={() => router.push('/(tabs)/expenses')}
+        >
+          <LinearGradient colors={NAV_EXPENSES_GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.navCard}>
+            <View style={styles.actionIconCircle}>
+              <MaterialIcons name="receipt-long" size={20} color="#FFE4E6" />
+            </View>
+            <View style={styles.navCardContent}>
+              <Text style={styles.navCardLabel} numberOfLines={1}>Last Month Expenses</Text>
+              <Text style={styles.navCardValue} numberOfLines={1}>{expensesDisplay}</Text>
+              <Text style={styles.navCardHint} numberOfLines={1}>{lastMonthExpenseHint}</Text>
+            </View>
+          </LinearGradient>
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [styles.navCardWrap, pressed && styles.actionCardPressed]}
+          onPress={() => goToPlannerTab('Bills')}
+        >
+          <LinearGradient colors={NAV_PLANNER_GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.navCard}>
+            <View style={styles.actionIconCircle}>
+              <MaterialIcons name="event-note" size={20} color="#E0E7FF" />
+            </View>
+            <View style={styles.navCardContent}>
+              <Text style={styles.navCardLabel} numberOfLines={1}>Monthly Bill</Text>
+              <Text style={styles.navCardValue} numberOfLines={1}>{plannerCommittedDisplay}</Text>
+              <Text style={styles.navCardHint} numberOfLines={1}>{subscriptionDueHint}</Text>
+            </View>
+          </LinearGradient>
+        </Pressable>
       </View>
+
 
       {/* Expense Trends */}
       <View style={styles.gradientCardWrap}>
@@ -287,11 +1065,19 @@ export default function DashboardScreen() {
           <View style={styles.chartRow}>
             {trendData.map((d) => {
               const barPct = maxTrend > 0 ? (d.total / maxTrend) * 100 : 0;
-              const showLabel = peakTrendDay?.day === d.day && d.total > 0;
+              const isPeak = peakTrendDay?.key === d.key && d.total > 0;
+              const isSelected = selectedTrendKey === d.key;
+              const showLabel = d.total > 0 && (isPeak || isSelected);
               return (
-                <View key={d.day} style={styles.barCol}>
+                <Pressable
+                  key={d.key}
+                  style={({ pressed }) => [styles.barCol, pressed && styles.barColPressed]}
+                  onPress={() => setSelectedTrendKey((prev) => (prev === d.key ? null : d.key))}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${d.dateLabel}, ${formatCurrency(d.total)}`}
+                >
                   {showLabel ? (
-                    <Text style={[styles.barValueLabel, { color: '#D1FAE5' }]}>
+                    <Text style={[styles.barValueLabel, { color: '#D1FAE5' }]} numberOfLines={1}>
                       ₹{Math.round(d.total)}
                     </Text>
                   ) : (
@@ -303,12 +1089,17 @@ export default function DashboardScreen() {
                         colors={[...TREND_BAR_GRADIENT]}
                         start={{ x: 0.5, y: 0 }}
                         end={{ x: 0.5, y: 1 }}
-                        style={[styles.barFill, { height: `${Math.max(barPct, 10)}%` }]}
+                        style={[styles.barFill, { height: `${barPct}%` }]}
                       />
                     ) : null}
                   </View>
-                  <Text style={[styles.barLabel, { color: 'rgba(255,255,255,0.72)' }]}>{d.day}</Text>
-                </View>
+                  <Text style={[styles.barLabel, { color: isSelected ? '#ECFDF5' : 'rgba(255,255,255,0.72)' }]}>
+                    {d.day}
+                  </Text>
+                  <Text style={[styles.barDateLabel, { color: isSelected ? '#A7F3D0' : 'rgba(255,255,255,0.5)' }]}>
+                    {d.dateLabel}
+                  </Text>
+                </Pressable>
               );
             })}
           </View>
@@ -455,71 +1246,75 @@ export default function DashboardScreen() {
       </View>
 
       {/* Planner breakdown — liabilities, subscriptions, bills kept separate */}
-      <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-        <Text style={[styles.cardTitle, { color: colors.text }]}>Planner Overview</Text>
-        <View style={styles.plannerRow}>
+      <LinearGradient
+        colors={[...SECTION_PLANNER_GRADIENT]}
+        locations={[0, 0.3, 0.65, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[styles.card, styles.sectionGradientCard]}
+      >
+        <Text style={[styles.cardTitle, styles.sectionOnDark]}>Planner Overview</Text>
+        <Pressable
+          style={({ pressed }) => [styles.plannerRow, pressed && { opacity: 0.85 }]}
+          onPress={() => goToPlannerTab('Liabilities')}
+        >
           <View style={styles.plannerRowLeft}>
-            <MaterialIcons name="account-balance-wallet" size={18} color={colors.primary} />
-            <Text style={[styles.plannerRowLabel, { color: colors.textMuted }]}>Liabilities (unpaid)</Text>
+            <MaterialIcons name="account-balance-wallet" size={18} color="#6EE7B7" />
+            <Text style={[styles.plannerRowLabel, styles.sectionMuted]}>Liabilities (unpaid)</Text>
           </View>
-          <Text style={[styles.plannerRowValue, { color: colors.text }]}>
-            {plannerBreakdown.liabilityRemaining > 0 ? formatCurrency(plannerBreakdown.liabilityRemaining) : '—'}
-          </Text>
-        </View>
-        <View style={[styles.plannerRow, { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border }]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+            <Text style={[styles.plannerRowValue, styles.sectionOnDark]}>
+              {plannerBreakdown.liabilityRemaining > 0 ? formatCurrency(plannerBreakdown.liabilityRemaining) : '—'}
+            </Text>
+            <MaterialIcons name="chevron-right" size={18} color="rgba(255,255,255,0.45)" />
+          </View>
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [
+            styles.plannerRow,
+            { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(255,255,255,0.16)' },
+            pressed && { opacity: 0.85 },
+          ]}
+          onPress={() => goToPlannerTab('Subscriptions')}
+        >
           <View style={styles.plannerRowLeft}>
-            <MaterialIcons name="subscriptions" size={18} color={colors.primary} />
-            <Text style={[styles.plannerRowLabel, { color: colors.textMuted }]}>Subscriptions / mo</Text>
+            <MaterialIcons name="subscriptions" size={18} color="#67E8F9" />
+            <Text style={[styles.plannerRowLabel, styles.sectionMuted]}>Subscriptions / mo</Text>
           </View>
-          <Text style={[styles.plannerRowValue, { color: colors.text }]}>
-            {plannerBreakdown.subscriptionsMonthly > 0 ? formatCurrency(plannerBreakdown.subscriptionsMonthly) : '—'}
-          </Text>
-        </View>
-        <View style={[styles.plannerRow, { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border }]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+            <Text style={[styles.plannerRowValue, styles.sectionOnDark]}>
+              {plannerBreakdown.subscriptionsMonthly > 0 ? formatCurrency(plannerBreakdown.subscriptionsMonthly) : '—'}
+            </Text>
+            <MaterialIcons name="chevron-right" size={18} color="rgba(255,255,255,0.45)" />
+          </View>
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [
+            styles.plannerRow,
+            { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(255,255,255,0.16)' },
+            pressed && { opacity: 0.85 },
+          ]}
+          onPress={() => goToPlannerTab('Bills')}
+        >
           <View style={styles.plannerRowLeft}>
-            <MaterialIcons name="receipt-long" size={18} color={colors.primary} />
-            <Text style={[styles.plannerRowLabel, { color: colors.textMuted }]}>Bills / mo</Text>
+            <MaterialIcons name="receipt-long" size={18} color="#FDBA74" />
+            <Text style={[styles.plannerRowLabel, styles.sectionMuted]}>Bills / mo</Text>
           </View>
-          <Text style={[styles.plannerRowValue, { color: colors.text }]}>
-            {plannerBreakdown.billsMonthly > 0 ? formatCurrency(plannerBreakdown.billsMonthly) : '—'}
-          </Text>
-        </View>
-        <View style={[styles.plannerCommitted, { backgroundColor: colors.emeraldSoft }]}>
-          <Text style={{ color: colors.emeraldText, fontWeight: '600', fontSize: 13 }}>Monthly committed</Text>
-          <Text style={{ color: colors.emeraldText, fontWeight: '800', fontSize: 16 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+            <Text style={[styles.plannerRowValue, styles.sectionOnDark]}>
+              {plannerBreakdown.billsMonthly > 0 ? formatCurrency(plannerBreakdown.billsMonthly) : '—'}
+            </Text>
+            <MaterialIcons name="chevron-right" size={18} color="rgba(255,255,255,0.45)" />
+          </View>
+        </Pressable>
+        <View style={[styles.plannerCommitted, styles.sectionGlass]}>
+          <Text style={{ color: '#A7F3D0', fontWeight: '600', fontSize: 13 }}>Monthly committed</Text>
+          <Text style={{ color: '#ECFDF5', fontWeight: '800', fontSize: 16 }}>
             {plannerBreakdown.committedMonthly > 0 ? formatCurrency(plannerBreakdown.committedMonthly) : '—'}
           </Text>
         </View>
-      </View>
-
-      {/* Quick Nav for viewing Expense and Planner */}
-      <View style={styles.actionRow}>
-        <Pressable
-          style={({ pressed }) => [styles.navCardWrap, pressed && styles.actionCardPressed]}
-          onPress={() => router.push('/(tabs)/expenses')}
-        >
-          <LinearGradient colors={NAV_EXPENSES_GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.navCard}>
-            <View style={styles.actionIconCircle}>
-              <MaterialIcons name="receipt-long" size={20} color="#FFE4E6" />
-            </View>
-            <Text style={styles.navCardLabel} numberOfLines={1}>View Expenses</Text>
-            <Text style={styles.navCardValue} numberOfLines={1}>{expensesDisplay}</Text>
-          </LinearGradient>
-        </Pressable>
-        <Pressable
-          style={({ pressed }) => [styles.navCardWrap, pressed && styles.actionCardPressed]}
-          onPress={() => router.push('/(tabs)/planner')}
-        >
-          <LinearGradient colors={NAV_PLANNER_GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.navCard}>
-            <View style={styles.actionIconCircle}>
-              <MaterialIcons name="event-note" size={20} color="#E0E7FF" />
-            </View>
-            <Text style={styles.navCardLabel} numberOfLines={1}>Planner</Text>
-            <Text style={styles.navCardValue} numberOfLines={1}>{plannerCommittedDisplay}</Text>
-            <Text style={styles.navCardHint} numberOfLines={1}>subs + bills / mo</Text>
-          </LinearGradient>
-        </Pressable>
-      </View>
+      </LinearGradient>
+     
 
       {/* Logs */}
       <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -583,6 +1378,15 @@ export default function DashboardScreen() {
           </View>
         </View>
       </Modal>
+
+      <LiabilityMonthDetailModal
+        visible={!!selectedLiabilityMonth}
+        month={selectedLiabilityMonth}
+        liabilities={liabilities}
+        colors={colors}
+        onClose={() => setSelectedLiabilityMonth(null)}
+        onSettle={settleLiabilityInstallment}
+      />
     </ScrollView>
   );
 }
@@ -608,13 +1412,121 @@ const styles = StyleSheet.create({
   archLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
   salutation: { fontSize: 14, fontWeight: '600', lineHeight: 18 },
   displayName: { fontSize: 17, fontWeight: '700', lineHeight: 22 },
-  heroCard: { borderRadius: 20, padding: 20 },
+  heroCard: { borderRadius: 20, padding: 20, overflow: 'hidden' },
+  heroStack: { gap: 12 },
+  savingsHeroIcon: { backgroundColor: 'rgba(34,211,238,0.18)', borderWidth: 1, borderColor: 'rgba(165,243,252,0.25)' },
+  savingsHeroLabel: { color: '#7DD3FC' },
+  savingsHeroSub: { color: '#BAE6FD' },
+  savingsHeroRemaining: { color: '#E0F2FE' },
+  savingsProgressTrack: { backgroundColor: 'rgba(15,23,42,0.55)' },
+  spendHeroIcon: {
+    backgroundColor: 'rgba(251,113,133,0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(254,205,211,0.3)',
+  },
+  spendHeroLabel: { color: '#FECDD3' },
+  spendHeroSub: { color: '#FECACA' },
+  spendProgressTrack: { backgroundColor: 'rgba(0,0,0,0.4)' },
+  spendHeroStatLabel: { color: '#FCA5A5' },
+  spendHeroStatValue: { color: '#FFF1F2' },
+  sectionGlass: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderColor: 'rgba(255,255,255,0.16)',
+  },
+  sectionMuted: { color: 'rgba(255,255,255,0.68)' },
+  sectionOnDark: { color: '#FFFFFF' },
+  sectionLink: { color: '#FDE68A' },
+  sectionEmpty: {
+    backgroundColor: 'rgba(0,0,0,0.28)',
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  sectionItemGlass: {
+    backgroundColor: 'rgba(0,0,0,0.28)',
+  },
+  heroHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  heroIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   heroLabel: { color: '#94A3B8', fontSize: 10, fontWeight: '800', letterSpacing: 1 },
-  heroAmount: { color: '#fff', fontSize: 28, fontWeight: '800', marginTop: 4 },
+  heroAmount: { color: '#fff', fontSize: 28, fontWeight: '800', marginTop: 10 },
   heroSub: { color: '#94A3B8', fontSize: 11, marginTop: 4 },
+  heroRemaining: { color: '#CBD5E1', fontSize: 12, fontWeight: '600', marginTop: 10 },
   progressTrack: { height: 8, backgroundColor: '#334155', borderRadius: 4, marginTop: 12, overflow: 'hidden' },
   progressFill: { height: '100%', borderRadius: 4 },
-  heroRemaining: { color: Colors.accentGreen, fontSize: 13, fontWeight: '600', marginTop: 8 },
+  splitProgressTrack: { flexDirection: 'row' },
+  heroLegendRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginTop: 10,
+  },
+  heroLegendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  heroLegendDot: { width: 8, height: 8, borderRadius: 4 },
+  spendMidRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    marginTop: 14,
+  },
+  spendAmountBlock: { flex: 1, minWidth: 0, justifyContent: 'center' },
+  spendAboveLabel: {
+    color: '#FECDD3',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  spendAmountValue: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '800',
+    marginTop: 2,
+  },
+  spendSaveRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'flex-end',
+    gap: 12,
+    marginTop: 12,
+    marginBottom: 2,
+  },
+  spendSaveLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 6,
+    minWidth: 0,
+  },
+  spendSaveRight: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 6,
+    maxWidth: '100%',
+  },
+  spendSaveLabel: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  spendSaveValue: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
+    flexShrink: 1,
+  },
+  spendSaveValueRight: { textAlign: 'right' },
+  heroStatsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 10, gap: 8 },
+  heroStat: { flex: 1, minWidth: 0 },
+  heroStatLabel: { color: '#94A3B8', fontSize: 10, fontWeight: '700' },
+  heroStatValue: { color: '#E2E8F0', fontSize: 12, fontWeight: '800', marginTop: 2 },
   borrowingCardWrap: { borderRadius: 18, overflow: 'hidden' },
   borrowingCard: {
     flexDirection: 'row',
@@ -635,25 +1547,115 @@ const styles = StyleSheet.create({
   borrowingLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 1.2 },
   borrowingAmount: { fontSize: 24, fontWeight: '800', marginTop: 4 },
   borrowingSub: { fontSize: 12, fontWeight: '600', marginTop: 4 },
-  bentoRow: { flexDirection: 'row', gap: 12 },
-  bentoCard: { flex: 1, borderRadius: 16, padding: 14, borderWidth: 1, minHeight: 112, justifyContent: 'space-between' },
-  bentoLabel: { fontSize: 11, fontWeight: '700' },
-  bentoText: { fontSize: 12, fontWeight: '500', lineHeight: 16 },
-  liabilityLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 1 },
-  liabilityName: { fontSize: 14, fontWeight: '700' },
+  liabilityMonthCard: { borderRadius: 16, padding: 14, borderWidth: 0, gap: 12, overflow: 'hidden' },
+  sectionGradientCard: { borderWidth: 0, overflow: 'hidden' },
+  liabilityMonthHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 },
+  liabilityMonthTitle: { fontSize: 15, fontWeight: '800' },
+  liabilityMonthLink: { flexDirection: 'row', alignItems: 'center' },
+  liabilityMonthStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderWidth: 1,
+  },
+  liabilityMonthStat: { flex: 1, alignItems: 'center' },
+  liabilityMonthStatDivider: { width: StyleSheet.hairlineWidth, height: 32 },
+  emiSummaryRow: { flexDirection: 'row', gap: 10 },
+  emiSummaryCard: {
+    flex: 1,
+    borderRadius: 12,
+    borderWidth: 1,
+    padding: 12,
+    gap: 6,
+    minWidth: 0,
+  },
+  emiSummaryIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emiSummaryLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 0.3 },
+  emiSummaryValue: { fontSize: 16, fontWeight: '800' },
+  emiLoanItem: {
+    width: 124,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    gap: 2,
+  },
+  emiLoanItemTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 4,
+  },
+  emiLoanStatusBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+  },
+  emiLoanStatusText: { color: '#fff', fontSize: 8, fontWeight: '800' },
+  emiLoanItemLabel: { fontSize: 10, fontWeight: '700', flex: 1 },
+  emiLoanItemMeta: { fontSize: 9, fontWeight: '600' },
+  emiLoanItemAmount: { fontSize: 12, fontWeight: '800', marginTop: 2 },
+  emiLoanItemSub: { fontSize: 9, fontWeight: '500' },
+  liabilityMonthTotalRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+  },
+  liabilityMonthRow: { gap: 10, paddingVertical: 2, paddingRight: 4 },
+  liabilityMonthItem: {
+    width: 118,
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
+  liabilityMonthItemTop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 6,
+  },
+  liabilityMonthStatusBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  liabilityMonthStatusText: { color: '#fff', fontSize: 9, fontWeight: '800' },
+  liabilityMonthLabel: { fontSize: 11, fontWeight: '700', flex: 1 },
+  liabilityMonthAmount: { fontSize: 15, fontWeight: '800', marginTop: 6 },
+  liabilityMonthEmpty: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: 12,
+    padding: 12,
+  },
   card: { borderRadius: 16, padding: 16, borderWidth: 1 },
   gradientCardWrap: { borderRadius: 16, overflow: 'hidden' },
   gradientCard: { borderRadius: 16, padding: 16 },
-  gradientCardTitle: { marginBottom: 14 },
+  gradientCardTitle: { marginBottom: 20},
   cardTitle: { fontSize: 16, fontWeight: '700', marginBottom: 12 },
-  sectionTitle: { fontSize: 15, fontWeight: '700', marginBottom: 14 },
+  sectionTitle: { fontSize: 15, fontWeight: '700', marginBottom: 16 },
   chartRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end', height: 130, paddingTop: 4 },
   barCol: { alignItems: 'center', flex: 1 },
-  barValueLabel: { fontSize: 11, fontWeight: '700', marginBottom: 4 },
+  barColPressed: { opacity: 0.88 },
+  barValueLabel: { fontSize: 10, fontWeight: '700', marginBottom: 4, maxWidth: '100%' },
   barValueSpacer: { height: 15, marginBottom: 4 },
   barTrack: { width: 28, height: 88, borderRadius: 10, justifyContent: 'flex-end', overflow: 'hidden' },
-  barFill: { width: '100%', borderTopLeftRadius: 10, borderTopRightRadius: 10 },
-  barLabel: { fontSize: 11, marginTop: 6, fontWeight: '500' },
+  barFill: { width: '100%', borderTopLeftRadius: 10, borderTopRightRadius: 10, minHeight: 4 },
+  barLabel: { fontSize: 11, marginTop: 6, fontWeight: '600' },
+  barDateLabel: { fontSize: 9, marginTop: 2, fontWeight: '500' },
   catBreakdownItem: { marginBottom: 14 },
   catBreakdownHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
   catBreakdownLeft: { flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 },
@@ -728,17 +1730,19 @@ const styles = StyleSheet.create({
   sheetCardLabel: { color: '#F0FDFA', fontSize: 12, fontWeight: '700' },
   navCardWrap: { flex: 1, borderRadius: 12, overflow: 'hidden' },
   navCard: {
+    flex: 1,
     borderRadius: 12,
     paddingVertical: 12,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 96,
-    gap: 6,
+    gap: 10,
+    minHeight: 72,
   },
-  navCardLabel: { color: '#F8FAFC', fontSize: 11, fontWeight: '700', textAlign: 'center' },
-  navCardValue: { color: '#FFFFFF', fontSize: 13, fontWeight: '800', textAlign: 'center' },
-  navCardHint: { color: 'rgba(255,255,255,0.75)', fontSize: 9, fontWeight: '600', textAlign: 'center' },
+  navCardContent: { flex: 1, justifyContent: 'center', gap: 2 },
+  navCardLabel: { color: '#F8FAFC', fontSize: 11, fontWeight: '700' },
+  navCardValue: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
+  navCardHint: { color: 'rgba(255,255,255,0.75)', fontSize: 9, fontWeight: '600', minHeight: 12 },
   plannerRow: {
     flexDirection: 'row',
     alignItems: 'center',

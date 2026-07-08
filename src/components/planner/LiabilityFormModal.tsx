@@ -1,6 +1,6 @@
 import { MaterialIcons } from '@expo/vector-icons';
-import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
-import { useEffect, useState } from 'react';
+import DateTimePicker, { type DateTimePickerChangeEvent } from '@react-native-community/datetimepicker';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -11,31 +11,54 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { KeyboardModalShell } from '@/src/components/KeyboardModalShell';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { Liability } from '@/src/types/models';
 import { themeColors } from '@/src/theme/colors';
-import { formatDate } from '@/src/utils/format';
-import { daysLeftLabel, LIABILITY_FREQUENCIES } from '@/src/utils/liabilitySchedule';
+import { formatCurrency, formatDate } from '@/src/utils/format';
+import {
+  daysLeftLabel,
+  getPaymentHistorySummary,
+  isAnnualFrequency,
+  LIABILITY_FREQUENCIES,
+} from '@/src/utils/liabilitySchedule';
+import { startOfDay } from '@/src/utils/recurringBilling';
 
 type ThemeColors = ReturnType<typeof themeColors>;
+
+export type LiabilityFormData = {
+  name: string;
+  amount: number;
+  frequency: string;
+  dueDateMillis: number;
+  paymentDateMillis?: number | null;
+};
 
 type Props = {
   visible: boolean;
   editing: Liability | null;
   colors: ThemeColors;
   onClose: () => void;
-  onSave: (data: { name: string; amount: number; frequency: string; dueDateMillis: number }) => Promise<void>;
+  onSave: (data: LiabilityFormData) => Promise<void>;
 };
+
+type DatePickerTarget = 'due' | 'payment' | null;
 
 export function LiabilityFormModal({ visible, editing, colors, onClose, onSave }: Props) {
   const insets = useSafeAreaInsets();
   const [name, setName] = useState('');
   const [amount, setAmount] = useState('');
   const [frequency, setFrequency] = useState('YEARLY');
-  const [dueDate, setDueDate] = useState(Date.now() + 30 * 86400000);
-  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [dueDate, setDueDate] = useState(() => startOfDay(Date.now()));
+  const [paymentDate, setPaymentDate] = useState<number | null>(null);
+  const [datePickerTarget, setDatePickerTarget] = useState<DatePickerTarget>(null);
   const [saving, setSaving] = useState(false);
+
+  const paymentHistory = useMemo(
+    () => (editing ? getPaymentHistorySummary(editing) : { count: 0, totalPaid: 0, records: [] }),
+    [editing]
+  );
 
   useEffect(() => {
     if (!visible) return;
@@ -44,18 +67,25 @@ export function LiabilityFormModal({ visible, editing, colors, onClose, onSave }
       setAmount(String(editing.amount));
       setFrequency(editing.frequency);
       setDueDate(editing.dueDateMillis);
+      setPaymentDate(editing.paymentDateMillis ?? null);
     } else {
       setName('');
       setAmount('');
       setFrequency('YEARLY');
-      setDueDate(Date.now() + 30 * 86400000);
+      setDueDate(startOfDay(Date.now()));
+      setPaymentDate(null);
     }
-    setShowDatePicker(false);
+    setDatePickerTarget(null);
   }, [visible, editing]);
 
-  const handleDateChange = (_event: DateTimePickerEvent, date?: Date) => {
-    if (Platform.OS === 'android') setShowDatePicker(false);
-    if (date) setDueDate(date.getTime());
+  const handleDateValueChange = (_event: DateTimePickerChangeEvent, date: Date) => {
+    if (!datePickerTarget) return;
+    if (datePickerTarget === 'due') {
+      setDueDate(date.getTime());
+    } else {
+      setPaymentDate(date.getTime());
+    }
+    if (Platform.OS === 'android') setDatePickerTarget(null);
   };
 
   const handleSave = async () => {
@@ -63,7 +93,13 @@ export function LiabilityFormModal({ visible, editing, colors, onClose, onSave }
     if (!name.trim() || isNaN(amt) || amt <= 0) return;
     setSaving(true);
     try {
-      await onSave({ name: name.trim(), amount: amt, frequency, dueDateMillis: dueDate });
+      await onSave({
+        name: name.trim(),
+        amount: amt,
+        frequency,
+        dueDateMillis: dueDate,
+        paymentDateMillis: paymentDate,
+      });
       onClose();
     } finally {
       setSaving(false);
@@ -75,8 +111,12 @@ export function LiabilityFormModal({ visible, editing, colors, onClose, onSave }
     { color: colors.text, borderColor: colors.border, backgroundColor: colors.surfaceVariant },
   ];
 
+  const showPaymentField = !!editing && isAnnualFrequency(frequency);
+
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      {visible ? (
+      <KeyboardModalShell>
       <View
         style={[
           styles.overlay,
@@ -89,7 +129,7 @@ export function LiabilityFormModal({ visible, editing, colors, onClose, onSave }
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <Text style={[styles.title, { color: colors.text }]}>
-            {editing ? `Details with ${editing.name}` : 'Add Liability'}
+            {editing ? `Details with ${editing.name}` : 'Add Annual Liability'}
           </Text>
 
           <KeyboardAwareScrollView
@@ -140,19 +180,50 @@ export function LiabilityFormModal({ visible, editing, colors, onClose, onSave }
             </View>
 
             <Text style={[styles.label, { color: colors.textMuted }]}>Due Date</Text>
-            <Pressable style={[inputStyle, styles.dateField]} onPress={() => setShowDatePicker(true)}>
+            <Pressable style={[inputStyle, styles.dateField]} onPress={() => setDatePickerTarget('due')}>
               <MaterialIcons name="event" size={20} color={colors.primary} />
               <Text style={{ color: colors.text, fontSize: 15, flex: 1 }}>{formatDate(dueDate)}</Text>
               <MaterialIcons name="keyboard-arrow-down" size={22} color={colors.textMuted} />
             </Pressable>
-            {showDatePicker && (
+
+            {showPaymentField ? (
+              <>
+                <Text style={[styles.label, { color: colors.textMuted }]}>Payment Date</Text>
+                <Pressable
+                  style={[inputStyle, styles.dateField]}
+                  onPress={() => setDatePickerTarget('payment')}
+                >
+                  <MaterialIcons name="payments" size={20} color={colors.emeraldText} />
+                  <Text style={{ color: paymentDate ? colors.text : colors.textMuted, fontSize: 15, flex: 1 }}>
+                    {paymentDate ? formatDate(paymentDate) : 'Record when paid'}
+                  </Text>
+                  {paymentDate ? (
+                    <Pressable
+                      onPress={() => setPaymentDate(null)}
+                      hitSlop={8}
+                      accessibilityLabel="Clear payment date"
+                    >
+                      <MaterialIcons name="close" size={18} color={colors.textMuted} />
+                    </Pressable>
+                  ) : (
+                    <MaterialIcons name="keyboard-arrow-down" size={22} color={colors.textMuted} />
+                  )}
+                </Pressable>
+                <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 16 }}>
+                  Saving with a payment date closes this year&apos;s liability and reopens it for the next cycle.
+                </Text>
+              </>
+            ) : null}
+
+            {datePickerTarget && (
               <DateTimePicker
-                value={new Date(dueDate)}
+                value={new Date(datePickerTarget === 'due' ? dueDate : paymentDate ?? Date.now())}
                 mode="date"
                 display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                minimumDate={new Date()}
-                onChange={handleDateChange}
-                onDismiss={() => setShowDatePicker(false)}
+                minimumDate={datePickerTarget === 'due' && !editing ? new Date() : undefined}
+                maximumDate={datePickerTarget === 'payment' ? new Date() : undefined}
+                onValueChange={handleDateValueChange}
+                onDismiss={() => setDatePickerTarget(null)}
               />
             )}
 
@@ -162,6 +233,42 @@ export function LiabilityFormModal({ visible, editing, colors, onClose, onSave }
                 {daysLeftLabel(dueDate)}
               </Text>
             </View>
+
+            {editing && paymentHistory.count > 0 ? (
+              <View style={[styles.historyCard, { borderColor: colors.border, backgroundColor: colors.surfaceVariant }]}>
+                <View style={styles.historyHeader}>
+                  <MaterialIcons name="history" size={18} color={colors.primary} />
+                  <Text style={[styles.historyTitle, { color: colors.text }]}>Payment History</Text>
+                </View>
+                <Text style={{ color: colors.textMuted, fontSize: 12, marginBottom: 8 }}>
+                  {paymentHistory.count} payment{paymentHistory.count === 1 ? '' : 's'} •{' '}
+                  {formatCurrency(paymentHistory.totalPaid)} total paid
+                </Text>
+                {paymentHistory.records.map((record) => (
+                  <View
+                    key={record.id}
+                    style={[styles.historyRow, { borderTopColor: colors.border }]}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: colors.text, fontWeight: '700', fontSize: 13 }}>
+                        {record.financialYearLabel}
+                      </Text>
+                      <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 2 }}>
+                        Due {formatDate(record.dueDateMillis)}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={{ color: colors.primary, fontWeight: '800', fontSize: 13 }}>
+                        {formatCurrency(record.amount)}
+                      </Text>
+                      <Text style={{ color: colors.emeraldText, fontSize: 11, marginTop: 2 }}>
+                        Paid {formatDate(record.paymentDateMillis)}
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : null}
 
             <View style={styles.actions}>
               <Pressable style={styles.cancelBtn} onPress={onClose} disabled={saving}>
@@ -182,6 +289,8 @@ export function LiabilityFormModal({ visible, editing, colors, onClose, onSave }
           </KeyboardAwareScrollView>
         </View>
       </View>
+      </KeyboardModalShell>
+      ) : null}
     </Modal>
   );
 }
@@ -220,6 +329,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 12,
+  },
+  historyCard: { borderWidth: 1, borderRadius: 14, padding: 12, gap: 4 },
+  historyHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
+  historyTitle: { fontSize: 14, fontWeight: '800' },
+  historyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
   },
   actions: {
     flexDirection: 'row',

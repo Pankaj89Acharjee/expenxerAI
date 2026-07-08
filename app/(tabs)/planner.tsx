@@ -1,5 +1,6 @@
 import { MaterialIcons } from '@expo/vector-icons';
-import { useState } from 'react';
+import { useLocalSearchParams, useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   FlatList,
@@ -10,14 +11,17 @@ import {
   Switch,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import { KeyboardModalShell } from '@/src/components/KeyboardModalShell';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColorScheme } from '@/components/useColorScheme';
 import { BillFormModal } from '@/src/components/planner/BillFormModal';
 import type { BillFormData } from '@/src/components/planner/BillFormModal';
-import { LiabilityFormModal } from '@/src/components/planner/LiabilityFormModal';
+import { LiabilityFormModal, type LiabilityFormData } from '@/src/components/planner/LiabilityFormModal';
+import { LoanFormModal, type LoanFormData, type LoanFormVariant } from '@/src/components/planner/LoanFormModal';
 import { LiabilityManageModal } from '@/src/components/planner/LiabilityManageModal';
 import { SubscriptionFormModal } from '@/src/components/planner/SubscriptionFormModal';
 import type { SubscriptionFormData } from '@/src/components/planner/SubscriptionFormModal';
@@ -25,30 +29,27 @@ import { useFinancialStore } from '@/src/store/useFinancialStore';
 import { themeColors } from '@/src/theme/colors';
 import type { Bill, BudgetTemplate, Liability, Subscription } from '@/src/types/models';
 import { currentMonthYear, formatCurrency, formatDate } from '@/src/utils/format';
-import { daysLeftLabel, getLiabilityRemainingAmount } from '@/src/utils/liabilitySchedule';
+import { loanTypeLabel } from '@/src/constants/loanTypes';
+import { daysLeftLabel, getCurrentMonthEmiStatus, getLiabilityListPaidBadge, getLiabilityRemainingAmount, getNextUnpaidInstallment, getPaymentHistorySummary, isAnnualFrequency, isCreditCardLoanLiability, isLoanLiability, buildSchedule, serializeInstallments, shouldRecordPayment } from '@/src/utils/liabilitySchedule';
+import { getRecurringPaymentStatus, recurringPaymentStatusLabel, wasRecentlyPaid } from '@/src/utils/recurringBilling';
 import { billListIcon, liabilityListIcon, subscriptionListIcon } from '@/src/utils/plannerIcons';
+import { PLANNER_TAB_HINTS, PLANNER_TAB_LABELS, PLANNER_TABS, type PlannerTab } from '@/src/constants/plannerTabs';
+import { parsePlannerTabParam } from '@/src/utils/plannerNavigation';
 
-type Tab = 'Liabilities' | 'Subscriptions' | 'Bills' | 'Templates';
+type Tab = PlannerTab;
 
-const TAB_HINTS: Record<Tab, string> = {
-  Liabilities: 'Large periodic obligations (insurance, tax). Not monthly services.',
-  Subscriptions: 'Recurring digital services — streaming, SaaS, apps.',
-  Bills: 'Fixed household bills — rent, electricity, school fees.',
-  Templates: 'Reusable monthly budget presets. Apply to set category limits.',
-};
-
-const TAB_LABELS: Record<Tab, string> = {
-  Liabilities: 'Annual Liabilities',
-  Subscriptions: 'Subscriptions',
-  Bills: 'Bills',
-  Templates: 'Budget Templates',
-};
+function isCreditCardLoanEntry(item: Liability): boolean {
+  return isCreditCardLoanLiability(item) || (item.kind === 'LOAN' && item.loanType === 'CREDIT_CARD');
+}
 
 export default function PlannerScreen() {
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
   const colors = themeColors(isDark);
   const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  /** Narzo-class phones (~360dp) + large font/display size break fixed 3-column loan rows */
+  const isCompactList = windowWidth < 400;
 
   const liabilities = useFinancialStore((s) => s.liabilities);
   const subscriptions = useFinancialStore((s) => s.subscriptions);
@@ -56,14 +57,16 @@ export default function PlannerScreen() {
   const templates = useFinancialStore((s) => s.budgetTemplates);
   const addLiability = useFinancialStore((s) => s.addLiability);
   const updateLiability = useFinancialStore((s) => s.updateLiability);
-  const deleteLiability = useFinancialStore((s) => s.deleteLiability);
+  const addLoan = useFinancialStore((s) => s.addLoan);
+  const updateLoan = useFinancialStore((s) => s.updateLoan);
   const addSubscription = useFinancialStore((s) => s.addSubscription);
   const updateSubscription = useFinancialStore((s) => s.updateSubscription);
   const toggleSubscriptionAlert = useFinancialStore((s) => s.toggleSubscriptionAlert);
   const stopSubscription = useFinancialStore((s) => s.stopSubscription);
-  const deleteSubscription = useFinancialStore((s) => s.deleteSubscription);
+  const recordSubscriptionPayment = useFinancialStore((s) => s.recordSubscriptionPayment);
   const addBill = useFinancialStore((s) => s.addBill);
   const updateBill = useFinancialStore((s) => s.updateBill);
+  const recordBillPayment = useFinancialStore((s) => s.recordBillPayment);
   const toggleBillAlert = useFinancialStore((s) => s.toggleBillAlert);
   const stopBill = useFinancialStore((s) => s.stopBill);
   const deleteBill = useFinancialStore((s) => s.deleteBill);
@@ -71,9 +74,27 @@ export default function PlannerScreen() {
   const deleteTemplate = useFinancialStore((s) => s.deleteTemplate);
   const applyTemplate = useFinancialStore((s) => s.applyTemplate);
 
-  const [activeTab, setActiveTab] = useState<Tab>('Liabilities');
+  const deleteLiability = useFinancialStore((s) => s.deleteLiability);
+  const deleteSubscription = useFinancialStore((s) => s.deleteSubscription);
+  const { tab: tabParam } = useLocalSearchParams<{ tab?: string }>();
+  const [activeTab, setActiveTab] = useState<Tab>('Loans');
+
+  useEffect(() => {
+    const tab = parsePlannerTabParam(tabParam);
+    if (tab) setActiveTab(tab);
+  }, [tabParam]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const tab = parsePlannerTabParam(tabParam);
+      if (tab) setActiveTab(tab);
+    }, [tabParam])
+  );
   const [showLiabilityForm, setShowLiabilityForm] = useState(false);
   const [editingLiability, setEditingLiability] = useState<Liability | null>(null);
+  const [showLoanForm, setShowLoanForm] = useState(false);
+  const [loanFormVariant, setLoanFormVariant] = useState<LoanFormVariant>('standard');
+  const [editingLoan, setEditingLoan] = useState<Liability | null>(null);
   const [managingLiability, setManagingLiability] = useState<Liability | null>(null);
   const [showSubscriptionForm, setShowSubscriptionForm] = useState(false);
   const [editingSubscription, setEditingSubscription] = useState<Subscription | null>(null);
@@ -93,12 +114,24 @@ export default function PlannerScreen() {
   const [templateGoalAmount, setTemplateGoalAmount] = useState('100');
   const [applyConfirm, setApplyConfirm] = useState<BudgetTemplate | null>(null);
 
-  const tabs: Tab[] = ['Liabilities', 'Subscriptions', 'Bills', 'Templates'];
+  const tabs: Tab[] = [...PLANNER_TABS];
+  const annualLiabilities = liabilities.filter((item) => !isLoanLiability(item));
+  const creditCardLoans = liabilities.filter((item) => isCreditCardLoanEntry(item));
+  const standardLoans = liabilities.filter(
+    (item) => isLoanLiability(item) && !isCreditCardLoanEntry(item)
+  );
   const inputStyle = [
     styles.input,
     { color: colors.text, borderColor: colors.border, backgroundColor: colors.surfaceVariant },
   ];
   const listBottomPad = 80 + insets.bottom;
+  const flatListPerf = {
+    initialNumToRender: 8,
+    maxToRenderPerBatch: 8,
+    windowSize: 7,
+    removeClippedSubviews: true as const,
+    updateCellsBatchingPeriod: 50,
+  };
 
   const openAddLiability = () => {
     setEditingLiability(null);
@@ -108,6 +141,58 @@ export default function PlannerScreen() {
   const openEditLiability = (item: Liability) => {
     setEditingLiability(item);
     setShowLiabilityForm(true);
+  };
+
+  const openAddLoan = () => {
+    setLoanFormVariant('standard');
+    setEditingLoan(null);
+    setShowLoanForm(true);
+  };
+
+  const openAddCreditCardLoan = () => {
+    setLoanFormVariant('credit_card');
+    setEditingLoan(null);
+    setShowLoanForm(true);
+  };
+
+  const openEditLoan = (item: Liability, variant: LoanFormVariant) => {
+    setLoanFormVariant(variant);
+    setEditingLoan(item);
+    setShowLoanForm(true);
+  };
+
+  const handleLoanSave = async (data: LoanFormData) => {
+    const isCard = loanFormVariant === 'credit_card';
+    const loanType = isCard ? 'CREDIT_CARD' : data.loanType;
+    const kind = isCard ? 'CREDIT_CARD_LOAN' : 'LOAN';
+
+    if (editingLoan) {
+      await updateLoan({
+        ...editingLoan,
+        kind,
+        name: data.name,
+        loanType,
+        amount: data.principal,
+        principal: data.principal,
+        emiAmount: data.emiAmount,
+        tenureMonths: data.tenureMonths,
+        dueDateMillis: data.firstEmiDueMillis,
+        interestRatePercent: data.interestRatePercent ?? null,
+        lender: data.lender ?? null,
+      });
+    } else {
+      await addLoan(
+        data.name,
+        loanType,
+        data.principal,
+        data.emiAmount,
+        data.tenureMonths,
+        data.firstEmiDueMillis,
+        data.interestRatePercent,
+        data.lender,
+        kind
+      );
+    }
   };
 
   const openAddSubscription = () => {
@@ -130,35 +215,62 @@ export default function PlannerScreen() {
     setShowBillForm(true);
   };
 
-  const handleLiabilitySave = async (data: {
-    name: string;
-    amount: number;
-    frequency: string;
-    dueDateMillis: number;
-  }) => {
+  const handleLiabilitySave = async (data: LiabilityFormData) => {
     if (editingLiability) {
-      await updateLiability({ ...editingLiability, ...data });
+      const next: Liability = {
+        ...editingLiability,
+        name: data.name,
+        amount: data.amount,
+        frequency: data.frequency,
+        dueDateMillis: data.dueDateMillis,
+        paymentDateMillis: data.paymentDateMillis ?? null,
+        kind: 'ANNUAL',
+      };
+      if (!shouldRecordPayment(editingLiability, data.paymentDateMillis)) {
+        next.paymentScheduleJson = serializeInstallments(
+          buildSchedule(data.amount, data.frequency, data.dueDateMillis)
+        );
+      }
+      await updateLiability(next, editingLiability);
     } else {
       await addLiability(data.name, data.amount, data.frequency, data.dueDateMillis);
     }
   };
 
   const handleManageSave = async (liability: Liability, paymentScheduleJson: string) => {
-    await updateLiability({ ...liability, paymentScheduleJson });
+    const updated = { ...liability, paymentScheduleJson };
+    await updateLiability(updated, managingLiability);
+    if (editingLoan?.id === liability.id) {
+      setEditingLoan(updated);
+    }
   };
 
   const handleSubscriptionSave = async (data: SubscriptionFormData) => {
     if (editingSubscription) {
-      await updateSubscription({
+      const base = {
         ...editingSubscription,
         name: data.name,
         cost: data.cost,
         billingCycle: data.billingCycle,
         category: data.purpose,
         isAlertEnabled: data.isAlertEnabled,
-      });
+        nextPaymentMillis: data.nextPaymentMillis,
+      };
+      if (data.recordPayment && data.paymentDateMillis != null) {
+        await recordSubscriptionPayment(base, data.paymentDateMillis);
+      } else {
+        await updateSubscription(base);
+      }
     } else {
-      await addSubscription(data.name, data.cost, data.billingCycle, data.purpose, data.isAlertEnabled);
+      await addSubscription(
+        data.name,
+        data.cost,
+        data.billingCycle,
+        data.purpose,
+        data.nextPaymentMillis,
+        data.isAlertEnabled,
+        data.recordPayment ? data.paymentDateMillis : null
+      );
     }
   };
 
@@ -175,16 +287,30 @@ export default function PlannerScreen() {
 
   const handleBillSave = async (data: BillFormData) => {
     if (editingBill) {
-      await updateBill({
+      const base = {
         ...editingBill,
         name: data.name,
         amount: data.amount,
         billingCycle: data.billingCycle,
-        category: data.purpose,
+        category: data.name,
         isAlertEnabled: data.isAlertEnabled,
-      });
+        nextPaymentMillis: data.nextPaymentMillis,
+      };
+      if (data.recordPayment && data.paymentDateMillis != null) {
+        await recordBillPayment(base, data.paymentDateMillis);
+      } else {
+        await updateBill(base);
+      }
     } else {
-      await addBill(data.name, data.amount, data.billingCycle, data.purpose, data.isAlertEnabled);
+      await addBill(
+        data.name,
+        data.amount,
+        data.billingCycle,
+        data.name,
+        data.nextPaymentMillis,
+        data.isAlertEnabled,
+        data.recordPayment ? data.paymentDateMillis : null
+      );
     }
   };
 
@@ -200,7 +326,9 @@ export default function PlannerScreen() {
   };
 
   const handleFabPress = () => {
-    if (activeTab === 'Liabilities') openAddLiability();
+    if (activeTab === 'Loans') openAddLoan();
+    else if (activeTab === 'CreditCards') openAddCreditCardLoan();
+    else if (activeTab === 'Liabilities') openAddLiability();
     else if (activeTab === 'Subscriptions') openAddSubscription();
     else if (activeTab === 'Bills') openAddBill();
     else setShowTemplateForm(true);
@@ -224,6 +352,131 @@ export default function PlannerScreen() {
       <MaterialIcons name={iconName} size={22} color={colors.primary} />
     </View>
   );
+
+  const renderPaidBadge = (isPaid: boolean, paymentDateMillis: number | null | undefined) => {
+    if (!isPaid || !paymentDateMillis) return null;
+    return (
+      <View style={[styles.paidBadge, { backgroundColor: colors.emeraldSoft }]}>
+        <Text style={{ color: colors.emeraldText, fontSize: 10, fontWeight: '800' }}>PAID</Text>
+        <Text style={{ color: colors.emeraldText, fontSize: 9, fontWeight: '600' }}>
+          {formatDate(paymentDateMillis)}
+        </Text>
+      </View>
+    );
+  };
+
+  const renderEmiMonthStatus = (item: Liability) => {
+    const emi = getCurrentMonthEmiStatus(item);
+    if (!emi.hasEmi) return null;
+    if (emi.isPaid) {
+      return renderPaidBadge(true, emi.paymentDateMillis);
+    }
+    return (
+      <View
+        style={[
+          styles.paidBadge,
+          {
+            backgroundColor: emi.isOverdue ? 'rgba(220,38,38,0.12)' : 'rgba(59,130,246,0.12)',
+            minWidth: 88,
+          },
+        ]}
+      >
+        <Text
+          style={{
+            color: emi.isOverdue ? colors.error : colors.primary,
+            fontSize: 10,
+            fontWeight: '800',
+            textAlign: 'center',
+          }}
+        >
+          CURRENT MONTH DUE
+        </Text>
+        <Text
+          style={{
+            color: emi.isOverdue ? colors.error : colors.primary,
+            fontSize: 10,
+            fontWeight: '600',
+            textAlign: 'center',
+          }}
+        >
+          {formatDate(emi.dueDateMillis!)}
+        </Text>
+      </View>
+    );
+  };
+
+  const renderLoanLikeItem = (
+    item: Liability,
+    opts: {
+      icon: keyof typeof MaterialIcons.glyphMap;
+      variant: LoanFormVariant;
+      typeLine: string;
+      manageLabel: string;
+    }
+  ) => {
+    const nextEmi = getNextUnpaidInstallment(item);
+    return (
+      <View
+        style={[
+          styles.listItem,
+          isCompactList && styles.listItemCompact,
+          { backgroundColor: colors.card, borderColor: colors.border },
+        ]}
+      >
+        {renderListIcon(opts.icon)}
+        <View style={[styles.listItemMain, isCompactList && styles.listItemMainCompact]}>
+          <View style={styles.listItemBody}>
+            <Pressable onPress={() => openEditLoan(item, opts.variant)}>
+              <Text style={[styles.detailsLink, { color: colors.primary }]} numberOfLines={2}>
+                Details with {item.name}
+              </Text>
+            </Pressable>
+            <Text style={[styles.itemMeta, { color: colors.textMuted }]} numberOfLines={2}>
+              {opts.typeLine}
+            </Text>
+            <Text style={[styles.itemMeta, { color: colors.textMuted, marginTop: 2 }]} numberOfLines={2}>
+              Next EMI {formatDate(nextEmi?.dueDateMillis ?? item.dueDateMillis)}
+              {item.lender ? ` • ${item.lender}` : ''}
+            </Text>
+            <View
+              style={[styles.daysChip, { backgroundColor: colors.emeraldSoft, alignSelf: 'flex-start', marginTop: 4 }]}
+            >
+              <Text style={{ color: colors.emeraldText, fontSize: 11, fontWeight: '700' }} numberOfLines={1}>
+                Remaining {formatCurrency(getLiabilityRemainingAmount(item))}
+              </Text>
+            </View>
+          </View>
+          <View style={[styles.listItemActions, isCompactList && styles.listItemActionsCompact]}>
+            <Text
+              style={{ color: colors.primary, fontWeight: '800', fontSize: 15 }}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.8}
+            >
+              {formatCurrency(item.emiAmount ?? 0)}
+              <Text style={{ fontSize: 11, fontWeight: '600' }}>/mo</Text>
+            </Text>
+            {renderEmiMonthStatus(item)}
+            <View style={styles.iconRow}>
+              <Pressable
+                style={[styles.iconBtn, { backgroundColor: colors.surfaceVariant }]}
+                onPress={() => setManagingLiability(item)}
+                accessibilityLabel={opts.manageLabel}
+              >
+                <MaterialIcons name="calendar-month" size={18} color={colors.primary} />
+              </Pressable>
+              <Pressable
+                style={[styles.iconBtn, { backgroundColor: colors.surfaceVariant }]}
+                onPress={() => deleteLiability(item)}
+              >
+                <MaterialIcons name="delete-outline" size={18} color={colors.error} />
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </View>
+    );
+  };
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -252,29 +505,80 @@ export default function PlannerScreen() {
                   numberOfLines={1}
                   style={{ color: selected ? '#fff' : colors.textMuted, fontWeight: '700', fontSize: 12 }}
                 >
-                  {TAB_LABELS[tab]}
+                  {PLANNER_TAB_LABELS[tab]}
                 </Text>
               </Pressable>
             );
           })}
         </ScrollView>
         <Text style={[styles.tabHint, { color: colors.textMuted }]} numberOfLines={2}>
-          {TAB_HINTS[activeTab]}
+          {PLANNER_TAB_HINTS[activeTab]}
         </Text>
       </View>
 
-      {activeTab === 'Liabilities' && (
+      {activeTab === 'Loans' && (
         <FlatList
-          data={liabilities}
+          data={standardLoans}
           keyExtractor={(i) => String(i.id)}
           contentContainerStyle={[styles.listContent, { paddingBottom: listBottomPad }]}
+          {...flatListPerf}
+          ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+          ListEmptyComponent={
+            <Text style={[styles.empty, { color: colors.textMuted }]}>
+              No bank loans tracked. Add personal, home, gold, or vehicle loans here.
+            </Text>
+          }
+          renderItem={({ item }: { item: Liability }) =>
+            renderLoanLikeItem(item, {
+              icon: 'account-balance',
+              variant: 'standard',
+              typeLine: `${loanTypeLabel(item.loanType)} • EMI ${formatCurrency(item.emiAmount ?? 0)} • ${item.tenureMonths} mo`,
+              manageLabel: `Manage EMI plan for ${item.name}`,
+            })
+          }
+        />
+      )}
+
+      {activeTab === 'CreditCards' && (
+        <FlatList
+          data={creditCardLoans}
+          keyExtractor={(i) => String(i.id)}
+          contentContainerStyle={[styles.listContent, { paddingBottom: listBottomPad }]}
+          {...flatListPerf}
+          ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+          ListEmptyComponent={
+            <Text style={[styles.empty, { color: colors.textMuted }]}>
+              No credit card loans tracked. Add outstanding balance as an EMI plan.
+            </Text>
+          }
+          renderItem={({ item }: { item: Liability }) =>
+            renderLoanLikeItem(item, {
+              icon: 'credit-card',
+              variant: 'credit_card',
+              typeLine: `Credit Card Loan • EMI ${formatCurrency(item.emiAmount ?? 0)} • ${item.tenureMonths} mo`,
+              manageLabel: `Manage card EMI for ${item.name}`,
+            })
+          }
+        />
+      )}
+
+      {activeTab === 'Liabilities' && (
+        <FlatList
+          data={annualLiabilities}
+          keyExtractor={(i) => String(i.id)}
+          contentContainerStyle={[styles.listContent, { paddingBottom: listBottomPad }]}
+          {...flatListPerf}
           ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
           ListEmptyComponent={
             <Text style={[styles.empty, { color: colors.textMuted }]}>
               No liabilities tracked. Tap + to add.
             </Text>
           }
-          renderItem={({ item }: { item: Liability }) => (
+          renderItem={({ item }: { item: Liability }) => {
+            const history = getPaymentHistorySummary(item);
+            const annual = isAnnualFrequency(item.frequency);
+            const paidBadge = getLiabilityListPaidBadge(item);
+            return (
             <View style={[styles.listItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
               {renderListIcon(liabilityListIcon())}
               <View style={styles.listItemBody}>
@@ -284,8 +588,13 @@ export default function PlannerScreen() {
                   </Text>
                 </Pressable>
                 <Text style={[styles.itemMeta, { color: colors.textMuted }]}>
-                  {item.frequency.replace('_', ' ')} • Due {formatDate(item.dueDateMillis)}
+                  {annual ? 'Annual' : item.frequency.replace('_', ' ')} • Due {formatDate(item.dueDateMillis)}
                 </Text>
+                {history.count > 0 ? (
+                  <Text style={[styles.itemMeta, { color: colors.textMuted, marginTop: 2 }]}>
+                    {history.count} past payment{history.count === 1 ? '' : 's'} • {formatCurrency(history.totalPaid)} paid
+                  </Text>
+                ) : null}
                 <View style={[styles.daysChip, { backgroundColor: colors.emeraldSoft }]}>
                   <MaterialIcons name="schedule" size={14} color={colors.emeraldText} />
                   <Text style={{ color: colors.emeraldText, fontSize: 12, fontWeight: '600' }}>
@@ -300,6 +609,7 @@ export default function PlannerScreen() {
                 <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '600' }}>
                   of {formatCurrency(item.amount)}
                 </Text>
+                {renderPaidBadge(paidBadge.isPaid, paidBadge.paymentDateMillis)}
                 <View style={styles.iconRow}>
                   <Pressable
                     style={[styles.iconBtn, { backgroundColor: colors.surfaceVariant }]}
@@ -312,12 +622,13 @@ export default function PlannerScreen() {
                     style={[styles.iconBtn, { backgroundColor: colors.surfaceVariant }]}
                     onPress={() => deleteLiability(item)}
                   >
-                    <MaterialIcons name="close" size={18} color={colors.error} />
+                    <MaterialIcons name="delete-outline" size={18} color={colors.error} />
                   </Pressable>
                 </View>
               </View>
             </View>
-          )}
+            );
+          }}
         />
       )}
 
@@ -326,12 +637,14 @@ export default function PlannerScreen() {
           data={subscriptions}
           keyExtractor={(i) => String(i.id)}
           contentContainerStyle={[styles.listContent, { paddingBottom: listBottomPad }]}
+          {...flatListPerf}
           ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
           ListEmptyComponent={
             <Text style={[styles.empty, { color: colors.textMuted }]}>No subscriptions tracked.</Text>
           }
           renderItem={({ item }: { item: Subscription }) => {
             const stopped = !item.isActive;
+            const payStatus = stopped ? null : getRecurringPaymentStatus(item.nextPaymentMillis, item.lastPaidMillis);
             return (
               <View
                 style={[
@@ -362,6 +675,38 @@ export default function PlannerScreen() {
                     {item.billingCycle} • {item.category}
                     {stopped ? ' • Stopped' : ` • Next ${formatDate(item.nextPaymentMillis)}`}
                   </Text>
+                  {!stopped && payStatus && payStatus !== 'paid' && (
+                    <View
+                      style={[
+                        styles.daysChip,
+                        {
+                          backgroundColor:
+                            payStatus === 'overdue'
+                              ? 'rgba(220,38,38,0.12)'
+                              : payStatus === 'due_soon'
+                                ? 'rgba(59,130,246,0.12)'
+                                : colors.surfaceVariant,
+                          alignSelf: 'flex-start',
+                          marginTop: 4,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            payStatus === 'overdue'
+                              ? colors.error
+                              : payStatus === 'due_soon'
+                                ? colors.primary
+                                : colors.textMuted,
+                          fontSize: 11,
+                          fontWeight: '700',
+                        }}
+                      >
+                        {recurringPaymentStatusLabel(payStatus)}
+                      </Text>
+                    </View>
+                  )}
                   {!stopped && (
                     <View style={styles.switchRow}>
                       <Text style={{ color: colors.textMuted, fontSize: 12 }}>Alert</Text>
@@ -380,6 +725,7 @@ export default function PlannerScreen() {
                       /{item.billingCycle === 'YEARLY' ? 'yr' : 'mo'}
                     </Text>
                   </Text>
+                  {renderPaidBadge(payStatus === 'paid' || wasRecentlyPaid(item.lastPaidMillis), item.lastPaidMillis)}
                   <View style={styles.iconRow}>
                     {!stopped && (
                       <Pressable
@@ -409,12 +755,28 @@ export default function PlannerScreen() {
           data={bills}
           keyExtractor={(i) => String(i.id)}
           contentContainerStyle={[styles.listContent, { paddingBottom: listBottomPad }]}
+          {...flatListPerf}
           ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
           ListEmptyComponent={
             <Text style={[styles.empty, { color: colors.textMuted }]}>No bills tracked. Tap + to add rent, utilities, etc.</Text>
           }
           renderItem={({ item }: { item: Bill }) => {
             const stopped = !item.isActive;
+            const status = getRecurringPaymentStatus(item.nextPaymentMillis, item.lastPaidMillis);
+            const statusColor =
+              status === 'overdue'
+                ? colors.error
+                : status === 'due_soon'
+                  ? colors.primary
+                  : colors.textMuted;
+            const cycleSuffix =
+              item.billingCycle === 'YEARLY'
+                ? 'yr'
+                : item.billingCycle === 'QUARTERLY'
+                  ? 'qtr'
+                  : item.billingCycle === 'HALF_YEARLY'
+                    ? '6mo'
+                    : 'mo';
             return (
               <View
                 style={[
@@ -426,7 +788,7 @@ export default function PlannerScreen() {
                   },
                 ]}
               >
-                {renderListIcon(billListIcon(item.category))}
+                {renderListIcon(billListIcon(item.name))}
                 <View style={styles.listItemBody}>
                   <Pressable onPress={() => openEditBill(item)} disabled={stopped}>
                     <Text
@@ -442,9 +804,16 @@ export default function PlannerScreen() {
                     </Text>
                   </Pressable>
                   <Text style={[styles.itemMeta, { color: colors.textMuted }]}>
-                    {item.billingCycle} • {item.category}
-                    {stopped ? ' • Stopped' : ` • Next ${formatDate(item.nextPaymentMillis)}`}
+                    {item.billingCycle}
+                    {stopped ? ' • Stopped' : ` • Due ${formatDate(item.nextPaymentMillis)}`}
                   </Text>
+                  {!stopped && status !== 'paid' ? (
+                    <View style={[styles.daysChip, { backgroundColor: colors.surfaceVariant, alignSelf: 'flex-start' }]}>
+                      <Text style={{ color: statusColor, fontSize: 11, fontWeight: '700' }}>
+                        {recurringPaymentStatusLabel(status)}
+                      </Text>
+                    </View>
+                  ) : null}
                   {!stopped && (
                     <View style={styles.switchRow}>
                       <Text style={{ color: colors.textMuted, fontSize: 12 }}>Alert</Text>
@@ -459,10 +828,9 @@ export default function PlannerScreen() {
                 <View style={styles.listItemActions}>
                   <Text style={{ color: colors.primary, fontWeight: '800', fontSize: 15 }}>
                     {formatCurrency(item.amount)}
-                    <Text style={{ fontSize: 11, fontWeight: '600' }}>
-                      /{item.billingCycle === 'YEARLY' ? 'yr' : item.billingCycle === 'QUARTERLY' ? 'qtr' : 'mo'}
-                    </Text>
+                    <Text style={{ fontSize: 11, fontWeight: '600' }}>/{cycleSuffix}</Text>
                   </Text>
+                  {renderPaidBadge(status === 'paid' || wasRecentlyPaid(item.lastPaidMillis), item.lastPaidMillis)}
                   <View style={styles.iconRow}>
                     {!stopped && (
                       <Pressable
@@ -492,6 +860,7 @@ export default function PlannerScreen() {
           data={templates}
           keyExtractor={(i) => String(i.id)}
           contentContainerStyle={[styles.listContent, { paddingBottom: listBottomPad }]}
+          {...flatListPerf}
           ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
           ListEmptyComponent={
             <Text style={[styles.empty, { color: colors.textMuted }]}>No budget templates. Tap + to create one.</Text>
@@ -527,6 +896,19 @@ export default function PlannerScreen() {
       >
         <MaterialIcons name="add" size={28} color="#fff" />
       </Pressable>
+
+      <LoanFormModal
+        visible={showLoanForm}
+        editing={editingLoan}
+        variant={loanFormVariant}
+        colors={colors}
+        onClose={() => {
+          setShowLoanForm(false);
+          setEditingLoan(null);
+        }}
+        onSave={handleLoanSave}
+        onManage={(liability) => setManagingLiability(liability)}
+      />
 
       <LiabilityFormModal
         visible={showLiabilityForm}
@@ -570,6 +952,8 @@ export default function PlannerScreen() {
       />
 
       <Modal visible={showTemplateForm} transparent animationType="fade" onRequestClose={() => setShowTemplateForm(false)}>
+        {showTemplateForm ? (
+        <KeyboardModalShell>
         <View
           style={[
             styles.modalOverlay,
@@ -609,6 +993,8 @@ export default function PlannerScreen() {
             </KeyboardAwareScrollView>
           </View>
         </View>
+        </KeyboardModalShell>
+        ) : null}
       </Modal>
 
       <Modal visible={!!applyConfirm} transparent animationType="fade">
@@ -658,6 +1044,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     gap: 12,
   },
+  listItemCompact: {
+    padding: 12,
+    gap: 10,
+  },
   listIconWrap: {
     width: 44,
     height: 44,
@@ -666,8 +1056,32 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginTop: 2,
   },
-  listItemBody: { flex: 1, gap: 6 },
-  listItemActions: { alignItems: 'flex-end', gap: 10 },
+  listItemMain: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  listItemMainCompact: {
+    flexDirection: 'column',
+    gap: 10,
+  },
+  listItemBody: { flex: 1, minWidth: 0, gap: 6 },
+  listItemActions: { alignItems: 'flex-end', gap: 10, flexShrink: 0 },
+  paidBadge: {
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    gap: 1,
+    minWidth: 64,
+  },
+  listItemActionsCompact: {
+    width: '100%',
+    alignItems: 'flex-end',
+    gap: 8,
+  },
   itemName: { fontWeight: '700', fontSize: 16 },
   detailsLink: { fontWeight: '700', fontSize: 15, textDecorationLine: 'underline' },
   itemMeta: { fontSize: 13 },
@@ -679,8 +1093,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 10,
+    maxWidth: '100%',
   },
-  iconRow: { flexDirection: 'row', gap: 8 },
+  iconRow: { flexDirection: 'row', gap: 8, flexShrink: 0 },
   iconBtn: { width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   switchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
   applyBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 10 },

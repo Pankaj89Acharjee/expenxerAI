@@ -45,13 +45,24 @@ export function billListIcon(purpose: string): IconName {
     case 'School Fees':
       return 'school';
     case 'Gas':
+    case 'Cooking Fuel':
       return 'local-fire-department';
     case 'Internet':
       return 'wifi';
+    case 'Phone / Mobile':
+      return 'phone-android';
     case 'Maintenance':
       return 'build';
     case 'Insurance Premium':
       return 'health-and-safety';
+    case 'Property Tax':
+      return 'apartment';
+    case 'Cable / DTH':
+      return 'tv';
+    case 'Security':
+      return 'security';
+    case 'Garbage / Sanitation':
+      return 'delete';
     default:
       return 'receipt-long';
   }

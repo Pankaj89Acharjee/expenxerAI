@@ -44,50 +44,67 @@ async function saveItem(
 }
 
 // --- Liabilities ---
+function mapLiabilityDoc(id: string, data: Record<string, unknown>): Liability {
+  return {
+    id,
+    userEmail: String(data.userEmail ?? ''),
+    name: String(data.name ?? ''),
+    amount: Number(data.amount ?? 0),
+    frequency: String(data.frequency ?? ''),
+    dueDateMillis: Number(data.dueDateMillis ?? 0),
+    isPaid: Boolean(data.isPaid),
+    autoRecalculate: data.autoRecalculate !== false,
+    paymentScheduleJson: data.paymentScheduleJson != null ? String(data.paymentScheduleJson) : undefined,
+    paymentDateMillis:
+      data.paymentDateMillis != null && data.paymentDateMillis !== ''
+        ? Number(data.paymentDateMillis)
+        : null,
+    paymentHistoryJson: data.paymentHistoryJson != null ? String(data.paymentHistoryJson) : undefined,
+    kind: data.kind === 'LOAN' || data.kind === 'CREDIT_CARD_LOAN' ? data.kind : 'ANNUAL',
+    loanType: data.loanType != null ? (String(data.loanType) as Liability['loanType']) : null,
+    principal: data.principal != null ? Number(data.principal) : null,
+    emiAmount: data.emiAmount != null ? Number(data.emiAmount) : null,
+    tenureMonths: data.tenureMonths != null ? Number(data.tenureMonths) : null,
+    interestRatePercent: data.interestRatePercent != null ? Number(data.interestRatePercent) : null,
+    lender: data.lender != null ? String(data.lender) : null,
+  };
+}
+
+function liabilityToFirestore(liability: Omit<Liability, 'id'> | Liability) {
+  return {
+    userEmail: liability.userEmail,
+    name: liability.name,
+    amount: liability.amount,
+    frequency: liability.frequency,
+    dueDateMillis: liability.dueDateMillis,
+    isPaid: liability.isPaid,
+    autoRecalculate: liability.autoRecalculate,
+    paymentScheduleJson: liability.paymentScheduleJson ?? '[]',
+    paymentDateMillis: liability.paymentDateMillis ?? null,
+    paymentHistoryJson: liability.paymentHistoryJson ?? '[]',
+    kind: liability.kind ?? 'ANNUAL',
+    loanType: liability.loanType ?? null,
+    principal: liability.principal ?? null,
+    emiAmount: liability.emiAmount ?? null,
+    tenureMonths: liability.tenureMonths ?? null,
+    interestRatePercent: liability.interestRatePercent ?? null,
+    lender: liability.lender ?? null,
+  };
+}
+
 export async function fetchLiabilities(uid: string): Promise<Liability[]> {
   const snap = await getDocs(userCol(uid, 'liabilities'));
   return snap.docs
-    .map((d) => {
-      const data = d.data();
-      return {
-        id: d.id,
-        userEmail: String(data.userEmail ?? ''),
-        name: String(data.name ?? ''),
-        amount: Number(data.amount ?? 0),
-        frequency: String(data.frequency ?? ''),
-        dueDateMillis: Number(data.dueDateMillis ?? 0),
-        isPaid: Boolean(data.isPaid),
-        autoRecalculate: data.autoRecalculate !== false,
-        paymentScheduleJson: data.paymentScheduleJson != null ? String(data.paymentScheduleJson) : undefined,
-      } satisfies Liability;
-    })
+    .map((d) => mapLiabilityDoc(d.id, d.data() as Record<string, unknown>))
     .sort((a, b) => a.dueDateMillis - b.dueDateMillis);
 }
 
 export async function addLiability(uid: string, liability: Omit<Liability, 'id'>): Promise<string> {
-  return saveItem(uid, 'liabilities', {
-    userEmail: liability.userEmail,
-    name: liability.name,
-    amount: liability.amount,
-    frequency: liability.frequency,
-    dueDateMillis: liability.dueDateMillis,
-    isPaid: liability.isPaid,
-    autoRecalculate: liability.autoRecalculate,
-    paymentScheduleJson: liability.paymentScheduleJson ?? '[]',
-  });
+  return saveItem(uid, 'liabilities', liabilityToFirestore(liability));
 }
 
 export async function updateLiability(uid: string, liability: Liability): Promise<void> {
-  await saveItem(uid, 'liabilities', {
-    userEmail: liability.userEmail,
-    name: liability.name,
-    amount: liability.amount,
-    frequency: liability.frequency,
-    dueDateMillis: liability.dueDateMillis,
-    isPaid: liability.isPaid,
-    autoRecalculate: liability.autoRecalculate,
-    paymentScheduleJson: liability.paymentScheduleJson ?? '[]',
-  }, liability.id);
+  await saveItem(uid, 'liabilities', liabilityToFirestore(liability), liability.id);
 }
 
 export async function deleteLiability(uid: string, id: string): Promise<void> {
@@ -111,6 +128,7 @@ export async function fetchSubscriptions(uid: string): Promise<Subscription[]> {
         isAlertEnabled: data.isAlertEnabled !== false,
         isActive: data.isActive !== false,
         lastPaidMillis: data.lastPaidMillis != null ? Number(data.lastPaidMillis) : null,
+        paymentHistoryJson: data.paymentHistoryJson != null ? String(data.paymentHistoryJson) : '[]',
       } satisfies Subscription;
     })
     .sort((a, b) => a.nextPaymentMillis - b.nextPaymentMillis);
@@ -127,6 +145,7 @@ export async function addSubscription(uid: string, sub: Omit<Subscription, 'id'>
     isAlertEnabled: sub.isAlertEnabled,
     isActive: sub.isActive,
     lastPaidMillis: sub.lastPaidMillis ?? null,
+    paymentHistoryJson: sub.paymentHistoryJson ?? '[]',
   });
 }
 
@@ -141,6 +160,7 @@ export async function updateSubscription(uid: string, sub: Subscription): Promis
     isAlertEnabled: sub.isAlertEnabled,
     isActive: sub.isActive,
     lastPaidMillis: sub.lastPaidMillis ?? null,
+    paymentHistoryJson: sub.paymentHistoryJson ?? '[]',
   }, sub.id);
 }
 
@@ -165,6 +185,7 @@ export async function fetchBills(uid: string): Promise<Bill[]> {
         isAlertEnabled: data.isAlertEnabled !== false,
         isActive: data.isActive !== false,
         lastPaidMillis: data.lastPaidMillis != null ? Number(data.lastPaidMillis) : null,
+        paymentHistoryJson: data.paymentHistoryJson != null ? String(data.paymentHistoryJson) : '[]',
       } satisfies Bill;
     })
     .sort((a, b) => a.nextPaymentMillis - b.nextPaymentMillis);
@@ -181,6 +202,7 @@ export async function addBill(uid: string, bill: Omit<Bill, 'id'>): Promise<stri
     isAlertEnabled: bill.isAlertEnabled,
     isActive: bill.isActive,
     lastPaidMillis: bill.lastPaidMillis ?? null,
+    paymentHistoryJson: bill.paymentHistoryJson ?? '[]',
   });
 }
 
@@ -198,6 +220,7 @@ export async function updateBill(uid: string, bill: Bill): Promise<void> {
       isAlertEnabled: bill.isAlertEnabled,
       isActive: bill.isActive,
       lastPaidMillis: bill.lastPaidMillis ?? null,
+      paymentHistoryJson: bill.paymentHistoryJson ?? '[]',
     },
     bill.id
   );
