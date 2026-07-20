@@ -1,11 +1,12 @@
 import { billExpenseCategory } from '@/src/constants/billPurposes';
-import { saveCloudExpense } from '@/src/services/expensesCloud';
+import { deleteCloudExpense, saveCloudExpense } from '@/src/services/expensesCloud';
 import type { Bill, Expense, Liability, Subscription } from '@/src/types/models';
 import {
   getEffectiveLoanEmi,
   isCreditCardLoanLiability,
   isLoanLiability,
   mergeLiabilitySchedule,
+  parsePaymentHistory,
 } from '@/src/utils/liabilitySchedule';
 import {
   parseBillPaymentHistory,
@@ -21,6 +22,10 @@ export function plannerLiabilityExpenseNote(liabilityId: string, installmentInde
   return `${PLANNER_LIABILITY_PREFIX}${liabilityId}:installment:${installmentIndex}`;
 }
 
+export function plannerLiabilityHistoryExpenseNote(liabilityId: string, recordId: string): string {
+  return `${PLANNER_LIABILITY_PREFIX}${liabilityId}:history:${recordId}`;
+}
+
 export function isPlannerLiabilityExpense(notes: string): boolean {
   return notes.startsWith(PLANNER_LIABILITY_PREFIX);
 }
@@ -31,6 +36,15 @@ export function findPlannerLiabilityExpense(
   installmentIndex: number
 ): Expense | undefined {
   const note = plannerLiabilityExpenseNote(liabilityId, installmentIndex);
+  return expenses.find((e) => e.notes === note);
+}
+
+export function findPlannerLiabilityHistoryExpense(
+  expenses: readonly Expense[],
+  liabilityId: string,
+  recordId: string
+): Expense | undefined {
+  const note = plannerLiabilityHistoryExpenseNote(liabilityId, recordId);
   return expenses.find((e) => e.notes === note);
 }
 
@@ -257,4 +271,224 @@ export function installmentExpenseAmount(liability: Liability, installmentIndex:
   if (inst && inst.amount > 0) return inst.amount;
   if (isLoanLiability(liability)) return getEffectiveLoanEmi(liability);
   return liability.amount / Math.max(1, schedule.length);
+}
+
+export function listLiabilityPaymentExpenses(
+  expenses: readonly Expense[],
+  liabilityId: string
+): Expense[] {
+  const prefix = `${PLANNER_LIABILITY_PREFIX}${liabilityId}:`;
+  return expenses.filter((e) => (e.notes ?? '').startsWith(prefix));
+}
+
+function installmentIndexFromExpenseNotes(notes: string | null | undefined): number | null {
+  const match = (notes ?? '').match(/:installment:(\d+)$/);
+  if (!match) return null;
+  const index = Number(match[1]);
+  return Number.isFinite(index) ? index : null;
+}
+
+function historyRecordIdFromExpenseNotes(notes: string | null | undefined): string | null {
+  const match = (notes ?? '').match(/:history:(.+)$/);
+  return match?.[1] ?? null;
+}
+
+export function buildLiabilityInstallmentExpense(
+  liability: Liability,
+  installmentIndex: number,
+  paymentDateMillis: number,
+  amount: number,
+  totalInstallments: number
+): Omit<Expense, 'id'> {
+  return {
+    userEmail: liability.userEmail,
+    title: buildLiabilityInstallmentExpenseTitle(liability, installmentIndex, totalInstallments),
+    amount,
+    category: liabilityExpenseCategory(liability),
+    dateMillis: paymentDateMillis,
+    notes: plannerLiabilityExpenseNote(liability.id, installmentIndex),
+    receiptPath: null,
+  };
+}
+
+export function buildLiabilityHistoryExpense(
+  liability: Liability,
+  recordId: string,
+  paymentDateMillis: number,
+  amount: number,
+  financialYearLabel?: string
+): Omit<Expense, 'id'> {
+  const fy = financialYearLabel ? ` (${financialYearLabel})` : '';
+  return {
+    userEmail: liability.userEmail,
+    title: `${liability.name} — Payment${fy}`,
+    amount,
+    category: liabilityExpenseCategory(liability),
+    dateMillis: paymentDateMillis,
+    notes: plannerLiabilityHistoryExpenseNote(liability.id, recordId),
+    receiptPath: null,
+  };
+}
+
+export function liabilityPaymentExpensesNeedSync(
+  liability: Liability,
+  expenses: readonly Expense[]
+): boolean {
+  const schedule = mergeLiabilitySchedule(liability);
+  const paidIndexes = new Set<number>();
+
+  for (let i = 0; i < schedule.length; i++) {
+    const inst = schedule[i];
+    if (!inst.isPaymentDone) continue;
+    paidIndexes.add(i);
+    const existing = findPlannerLiabilityExpense(expenses, liability.id, i);
+    if (!existing) return true;
+    const amount = inst.amount > 0 ? inst.amount : installmentExpenseAmount(liability, i);
+    const expected = buildLiabilityInstallmentExpense(
+      liability,
+      i,
+      inst.paymentDateMillis ?? existing.dateMillis,
+      amount,
+      schedule.length
+    );
+    if (
+      existing.title !== expected.title ||
+      existing.amount !== expected.amount ||
+      existing.category !== expected.category ||
+      existing.notes !== expected.notes
+    ) {
+      return true;
+    }
+  }
+
+  const history = isLoanLiability(liability) ? [] : parsePaymentHistory(liability.paymentHistoryJson);
+  const historyIds = new Set(history.map((r) => r.id));
+  for (const record of history) {
+    const existing = findPlannerLiabilityHistoryExpense(expenses, liability.id, record.id);
+    if (!existing) return true;
+    const expected = buildLiabilityHistoryExpense(
+      liability,
+      record.id,
+      record.paymentDateMillis,
+      record.amount,
+      record.financialYearLabel
+    );
+    if (
+      existing.title !== expected.title ||
+      existing.amount !== expected.amount ||
+      existing.category !== expected.category ||
+      existing.notes !== expected.notes
+    ) {
+      return true;
+    }
+  }
+
+  return listLiabilityPaymentExpenses(expenses, liability.id).some((expense) => {
+    const notes = expense.notes ?? '';
+    if (notes.includes(':installment:')) {
+      const index = installmentIndexFromExpenseNotes(notes);
+      return index == null || !paidIndexes.has(index);
+    }
+    if (notes.includes(':history:')) {
+      const recordId = historyRecordIdFromExpenseNotes(notes);
+      return recordId == null || !historyIds.has(recordId);
+    }
+    return true;
+  });
+}
+
+/** Create/update/delete Expenses rows to match paid installments and annual payment history. */
+export async function syncLiabilityPaymentExpenses(
+  uid: string,
+  liability: Liability,
+  expenses: readonly Expense[]
+): Promise<boolean> {
+  const schedule = mergeLiabilitySchedule(liability);
+  let changed = false;
+  const paidIndexes = new Set<number>();
+
+  for (let i = 0; i < schedule.length; i++) {
+    const inst = schedule[i];
+    if (!inst.isPaymentDone) continue;
+    paidIndexes.add(i);
+
+    const amount = inst.amount > 0 ? inst.amount : installmentExpenseAmount(liability, i);
+    const paymentDateMillis = inst.paymentDateMillis ?? Date.now();
+    const payload = buildLiabilityInstallmentExpense(
+      liability,
+      i,
+      paymentDateMillis,
+      amount,
+      schedule.length
+    );
+    const existing = findPlannerLiabilityExpense(expenses, liability.id, i);
+
+    if (existing) {
+      if (
+        existing.title !== payload.title ||
+        existing.amount !== payload.amount ||
+        existing.category !== payload.category ||
+        existing.dateMillis !== payload.dateMillis ||
+        existing.notes !== payload.notes
+      ) {
+        await saveCloudExpense(uid, payload, existing.id);
+        changed = true;
+      }
+      continue;
+    }
+
+    await saveCloudExpense(uid, payload);
+    changed = true;
+  }
+
+  const history = isLoanLiability(liability) ? [] : parsePaymentHistory(liability.paymentHistoryJson);
+  const historyIds = new Set(history.map((r) => r.id));
+
+  for (const record of history) {
+    const payload = buildLiabilityHistoryExpense(
+      liability,
+      record.id,
+      record.paymentDateMillis,
+      record.amount,
+      record.financialYearLabel
+    );
+    const existing = findPlannerLiabilityHistoryExpense(expenses, liability.id, record.id);
+    if (existing) {
+      if (
+        existing.title !== payload.title ||
+        existing.amount !== payload.amount ||
+        existing.category !== payload.category ||
+        existing.dateMillis !== payload.dateMillis ||
+        existing.notes !== payload.notes
+      ) {
+        await saveCloudExpense(uid, payload, existing.id);
+        changed = true;
+      }
+      continue;
+    }
+    await saveCloudExpense(uid, payload);
+    changed = true;
+  }
+
+  for (const expense of listLiabilityPaymentExpenses(expenses, liability.id)) {
+    const notes = expense.notes ?? '';
+    if (notes.includes(':installment:')) {
+      const index = installmentIndexFromExpenseNotes(notes);
+      if (index != null && paidIndexes.has(index)) continue;
+      await deleteCloudExpense(uid, expense.id);
+      changed = true;
+      continue;
+    }
+    if (notes.includes(':history:')) {
+      const recordId = historyRecordIdFromExpenseNotes(notes);
+      if (recordId != null && historyIds.has(recordId)) continue;
+      await deleteCloudExpense(uid, expense.id);
+      changed = true;
+      continue;
+    }
+    await deleteCloudExpense(uid, expense.id);
+    changed = true;
+  }
+
+  return changed;
 }

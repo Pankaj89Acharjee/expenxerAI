@@ -19,6 +19,7 @@ import { LiabilityMonthDetailModal } from '@/src/components/dashboard/LiabilityM
 import { AnnualSpendLineChart } from '@/src/components/dashboard/AnnualSpendLineChart';
 import { CategoryMixCard } from '@/src/components/dashboard/CategoryMixCard';
 import { SpendSaveRadialPie } from '@/src/components/dashboard/MiniRadialPie';
+import { LiabilityManageModal } from '@/src/components/planner/LiabilityManageModal';
 import { useColorScheme } from '@/components/useColorScheme';
 import { useFinancialStore } from '@/src/store/useFinancialStore';
 import { themeColors, Colors } from '@/src/theme/colors';
@@ -42,7 +43,7 @@ import {
 import { exportCsv, exportPdfReport } from '@/src/utils/export';
 import { emiSummaryPlannerTab, plannerHref } from '@/src/utils/plannerNavigation';
 import type { PlannerTab } from '@/src/constants/plannerTabs';
-import type { SavingGoal } from '@/src/types/models';
+import type { Liability, SavingGoal } from '@/src/types/models';
 
 const TREND_BAR_GRADIENT = ['#6EE7B7', '#34D399', '#059669', '#047857'] as const;
 
@@ -120,6 +121,7 @@ export default function DashboardScreen() {
   const addSavingContribution = useFinancialStore((s) => s.addSavingContribution);
   const refreshUserData = useFinancialStore((s) => s.refreshUserData);
   const settleLiabilityInstallment = useFinancialStore((s) => s.settleLiabilityInstallment);
+  const updateLiability = useFinancialStore((s) => s.updateLiability);
 
   const [showExport, setShowExport] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -131,7 +133,8 @@ export default function DashboardScreen() {
   const [selectedTrendKey, setSelectedTrendKey] = useState<string | null>(null);
   const [selectedAnnualKey, setSelectedAnnualKey] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [selectedLiabilityMonth, setSelectedLiabilityMonth] = useState<MonthlyLiabilityBucket | null>(null);
+  const [selectedLiabilityMonthYear, setSelectedLiabilityMonthYear] = useState<string | null>(null);
+  const [managingLiability, setManagingLiability] = useState<Liability | null>(null);
 
   const refreshDashboard = useCallback(async () => {
     setRefreshing(true);
@@ -161,6 +164,10 @@ export default function DashboardScreen() {
   const monthlyLiabilityTotals = useMemo(
     () => computeMonthlyLiabilityTotals(liabilities),
     [liabilities]
+  );
+  const selectedLiabilityMonth = useMemo(
+    () => monthlyLiabilityTotals.find((m) => m.monthYear === selectedLiabilityMonthYear) ?? null,
+    [monthlyLiabilityTotals, selectedLiabilityMonthYear]
   );
   const liabilityInstallmentSummary = useMemo(
     () => computeLiabilityInstallmentSummary(liabilities),
@@ -726,6 +733,7 @@ export default function DashboardScreen() {
               {monthlyLiabilityTotals.map((month) => {
                 const isCurrent = month.monthYear === currentMonthYear;
                 const statusMeta = getMonthStatusMeta(month);
+                const [monthName, yearName] = month.label.split(' ');
                 return (
                   <Pressable
                     key={month.monthYear}
@@ -738,25 +746,37 @@ export default function DashboardScreen() {
                       },
                       isCurrent && { borderWidth: 2 },
                     ]}
-                    onPress={() => setSelectedLiabilityMonth(month)}
+                    onPress={() => setSelectedLiabilityMonthYear(month.monthYear)}
                   >
-                    <View style={styles.liabilityMonthItemTop}>
+                    <View style={[styles.liabilityMonthStatusBadge, { backgroundColor: statusMeta.color, alignSelf: 'flex-start' }]}>
+                      <Text style={styles.liabilityMonthStatusText}>{statusMeta.label}</Text>
+                    </View>
+                    <Text
+                      style={[
+                        styles.liabilityMonthLabel,
+                        { color: isCurrent ? '#FDE68A' : 'rgba(255,255,255,0.78)' },
+                      ]}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.85}
+                    >
+                      {monthName || month.label}
+                    </Text>
+                    {yearName ? (
                       <Text
                         style={[
-                          styles.liabilityMonthLabel,
-                          { color: isCurrent ? '#FDE68A' : 'rgba(255,255,255,0.7)' },
+                          styles.liabilityMonthYear,
+                          { color: isCurrent ? '#FDE68A' : 'rgba(255,255,255,0.55)' },
                         ]}
+                        numberOfLines={1}
                       >
-                        {month.label}
+                        {yearName}
                       </Text>
-                      <View style={[styles.liabilityMonthStatusBadge, { backgroundColor: statusMeta.color }]}>
-                        <Text style={styles.liabilityMonthStatusText}>{statusMeta.label}</Text>
-                      </View>
-                    </View>
-                    <Text style={[styles.liabilityMonthAmount, { color: statusMeta.color }]}>
+                    ) : null}
+                    <Text style={[styles.liabilityMonthAmount, { color: statusMeta.color }]} numberOfLines={1}>
                       {formatCurrency(month.total)}
                     </Text>
-                    <Text style={[styles.sectionMuted, { fontSize: 10, marginTop: 4 }]}>
+                    <Text style={[styles.sectionMuted, { fontSize: 10, marginTop: 4 }]} numberOfLines={1}>
                       {month.status === 'overdue'
                         ? `${month.overdueCount} overdue`
                         : month.status === 'pending'
@@ -1384,8 +1404,24 @@ export default function DashboardScreen() {
         month={selectedLiabilityMonth}
         liabilities={liabilities}
         colors={colors}
-        onClose={() => setSelectedLiabilityMonth(null)}
+        onClose={() => setSelectedLiabilityMonthYear(null)}
         onSettle={settleLiabilityInstallment}
+        onManage={(liability) => setManagingLiability(liability)}
+        onOpenInPlanner={(tab) => {
+          setSelectedLiabilityMonthYear(null);
+          goToPlannerTab(tab);
+        }}
+      />
+
+      <LiabilityManageModal
+        visible={!!managingLiability}
+        liability={managingLiability}
+        colors={colors}
+        onClose={() => setManagingLiability(null)}
+        onSave={async (liability, paymentScheduleJson) => {
+          await updateLiability({ ...liability, paymentScheduleJson }, managingLiability);
+          setManagingLiability(null);
+        }}
       />
     </ScrollView>
   );
@@ -1614,11 +1650,11 @@ const styles = StyleSheet.create({
   },
   liabilityMonthRow: { gap: 10, paddingVertical: 2, paddingRight: 4 },
   liabilityMonthItem: {
-    width: 118,
+    width: 108,
     borderRadius: 14,
     borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
   },
   liabilityMonthItemTop: {
     flexDirection: 'row',
@@ -1630,10 +1666,12 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingHorizontal: 7,
     paddingVertical: 2,
+    marginBottom: 6,
   },
   liabilityMonthStatusText: { color: '#fff', fontSize: 9, fontWeight: '800' },
-  liabilityMonthLabel: { fontSize: 11, fontWeight: '700', flex: 1 },
-  liabilityMonthAmount: { fontSize: 15, fontWeight: '800', marginTop: 6 },
+  liabilityMonthLabel: { fontSize: 13, fontWeight: '800', letterSpacing: 0.2 },
+  liabilityMonthYear: { fontSize: 11, fontWeight: '600', marginTop: 1 },
+  liabilityMonthAmount: { fontSize: 14, fontWeight: '800', marginTop: 8 },
   liabilityMonthEmpty: {
     flexDirection: 'row',
     alignItems: 'center',

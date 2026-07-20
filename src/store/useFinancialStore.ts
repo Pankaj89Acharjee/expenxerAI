@@ -35,15 +35,13 @@ import { buildSchedule, buildLoanEmiSchedule, completeLiabilityPayment, isLoanLi
 import { billExpenseCategory } from '@/src/constants/billPurposes';
 import {
   billPaymentExpensesNeedSync,
-  buildLiabilityInstallmentExpenseTitle,
-  findPlannerLiabilityExpense,
-  installmentExpenseAmount,
-  liabilityExpenseCategory,
+  liabilityPaymentExpensesNeedSync,
   listBillPaymentExpenses,
+  listLiabilityPaymentExpenses,
   listSubscriptionPaymentExpenses,
-  plannerLiabilityExpenseNote,
   subscriptionPaymentExpensesNeedSync,
   syncBillPaymentExpenses,
+  syncLiabilityPaymentExpenses,
   syncSubscriptionPaymentExpenses,
 } from '@/src/utils/plannerExpenses';
 import {
@@ -428,13 +426,23 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
           const liveExpenses = await fetchCloudExpenses(uid);
           const liveSubs = get().subscriptions;
           const liveBills = get().bills;
+          const liveLiabilities = get().liabilities;
           const subsNeedingExpenseSync = liveSubs.filter((sub) =>
             subscriptionPaymentExpensesNeedSync(sub, liveExpenses)
           );
           const billsNeedingExpenseSync = liveBills.filter((bill) =>
             billPaymentExpensesNeedSync(bill, liveExpenses)
           );
-          if (subsNeedingExpenseSync.length === 0 && billsNeedingExpenseSync.length === 0) return;
+          const liabilitiesNeedingExpenseSync = liveLiabilities.filter((liability) =>
+            liabilityPaymentExpensesNeedSync(liability, liveExpenses)
+          );
+          if (
+            subsNeedingExpenseSync.length === 0 &&
+            billsNeedingExpenseSync.length === 0 &&
+            liabilitiesNeedingExpenseSync.length === 0
+          ) {
+            return;
+          }
 
           // Sequential so each sync sees newly created expense rows.
           for (const sub of subsNeedingExpenseSync) {
@@ -442,6 +450,9 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
           }
           for (const bill of billsNeedingExpenseSync) {
             await syncBillPaymentExpenses(uid, bill, get().expenses);
+          }
+          for (const liability of liabilitiesNeedingExpenseSync) {
+            await syncLiabilityPaymentExpenses(uid, liability, get().expenses);
           }
           const expenses = await fetchCloudExpenses(uid);
           if (currentUid() === uid) set({ expenses });
@@ -684,13 +695,15 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
         isOverdue: false,
       };
     });
-    await updateCloudLiability(uid, {
+    const toSave = {
       ...liability,
       amount: principal,
       principal,
       emiAmount,
       paymentScheduleJson: serializeInstallments(merged),
-    });
+    };
+    await updateCloudLiability(uid, toSave);
+    await syncLiabilityPaymentExpenses(uid, toSave, get().expenses);
     await get().refreshUserData();
   },
 
@@ -715,6 +728,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       }
     }
     await updateCloudLiability(uid, toSave);
+    await syncLiabilityPaymentExpenses(uid, toSave, get().expenses);
     await get().refreshUserData();
   },
 
@@ -733,22 +747,8 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     const email = get().currentUserEmail;
     const uid = currentUid();
     if (!email || !uid) return;
-    if (findPlannerLiabilityExpense(get().expenses, liabilityId, installmentIndex)) return;
-
-    const settledSchedule = mergeLiabilitySchedule(updated);
-    const paidInstallment = settledSchedule[installmentIndex];
-    const paymentDateMillis = paidInstallment?.paymentDateMillis ?? Date.now();
-    const amount = paidInstallment?.amount ?? installmentExpenseAmount(updated, installmentIndex);
-
-    await saveCloudExpense(uid, {
-      userEmail: email,
-      title: buildLiabilityInstallmentExpenseTitle(updated, installmentIndex, settledSchedule.length),
-      amount,
-      category: liabilityExpenseCategory(updated),
-      dateMillis: paymentDateMillis,
-      notes: plannerLiabilityExpenseNote(liabilityId, installmentIndex),
-      receiptPath: null,
-    });
+    const amount =
+      mergeLiabilitySchedule(updated)[installmentIndex]?.amount ?? installment.amount;
     await addCloudLog(
       uid,
       email,
@@ -756,12 +756,13 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       `Logged ₹${amount.toFixed(2)} for '${updated.name}' installment ${installmentIndex + 1}.`,
       'EXPENSE'
     );
-    await get().refreshUserData();
   },
 
   deleteLiability: async (liability) => {
     const uid = currentUid();
     if (!uid) return;
+    const linked = listLiabilityPaymentExpenses(get().expenses, liability.id);
+    await Promise.all(linked.map((expense) => deleteCloudExpense(uid, expense.id)));
     await deleteCloudLiability(uid, liability.id);
     await get().refreshUserData();
   },
@@ -1268,6 +1269,9 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       await updateChatSessionTitle(uid, sessionId, title);
       set({ chatSessions: await fetchChatSessions(uid) });
     }
+
+    // Pull latest Planner/expense state before building LLM context.
+    await get().refreshUserData();
 
     const state = get();
     const systemPrompt = buildAdvisorSystemPrompt({

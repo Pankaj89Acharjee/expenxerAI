@@ -411,15 +411,24 @@ export function startOfToday(now = Date.now()): number {
   return d.getTime();
 }
 
+export function isInstallmentPaid(inst: Pick<LiabilityInstallment, 'isPaymentDone' | 'paymentStatus' | 'paymentDateMillis'>): boolean {
+  return (
+    Boolean(inst.isPaymentDone) ||
+    inst.paymentStatus === 'done' ||
+    (inst.paymentDateMillis != null && inst.paymentDateMillis > 0)
+  );
+}
+
 export function normalizeInstallment(
   inst: LiabilityInstallment,
   now = Date.now()
 ): LiabilityInstallment {
-  const isDone = inst.isPaymentDone;
+  const isDone = isInstallmentPaid(inst);
   const paymentStatus: 'pending' | 'done' = isDone ? 'done' : 'pending';
   const isOverdue = !isDone && inst.dueDateMillis < startOfToday(now);
   return {
     ...inst,
+    isPaymentDone: isDone,
     paymentStatus,
     isOverdue,
   };
@@ -497,7 +506,7 @@ export function computeLiabilityInstallmentSummary(
   for (const liability of liabilities) {
     const schedule = normalizeInstallments(mergeLiabilitySchedule(liability), now);
     for (const inst of schedule) {
-      if (inst.paymentStatus === 'done' || inst.isPaymentDone) {
+      if (isInstallmentPaid(inst)) {
         doneCount += 1;
       } else if (inst.isOverdue) {
         overdueCount += 1;
@@ -682,7 +691,18 @@ export type MonthlyLiabilityItemDetail = {
   paymentDateMillis: number | null;
   kindLabel: string;
   typeLabel: string;
+  /** True when this row comes from payment history (annual cycle), not an open schedule row. */
+  fromHistory?: boolean;
 };
+
+function monthYearFromMillis(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function monthLabelFromMillis(ms: number): string {
+  return new Date(ms).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
+}
 
 export function getMonthlyLiabilityDetails(
   liabilities: readonly Liability[],
@@ -693,9 +713,12 @@ export function getMonthlyLiabilityDetails(
 
   for (const liability of liabilities) {
     const schedule = normalizeInstallments(mergeLiabilitySchedule(liability), now);
+    const coveredKeys = new Set<string>();
+
     schedule.forEach((inst, installmentIndex) => {
       if (inst.monthYear !== monthYear) return;
-      const isDone = inst.paymentStatus === 'done' || inst.isPaymentDone;
+      const isDone = isInstallmentPaid(inst);
+      coveredKeys.add(`${liability.id}:${inst.monthYear}:${inst.dueDateMillis}`);
       items.push({
         liabilityId: liability.id,
         liabilityName: liability.name,
@@ -708,6 +731,29 @@ export function getMonthlyLiabilityDetails(
         typeLabel: getLiabilityTypeLabel(liability),
       });
     });
+
+    // Annual form payments live in history after the schedule advances — still show them as Done.
+    if (!isLoanLiability(liability)) {
+      for (const record of parsePaymentHistory(liability.paymentHistoryJson)) {
+        const recordMonth = monthYearFromMillis(record.dueDateMillis);
+        if (recordMonth !== monthYear) continue;
+        const key = `${liability.id}:${recordMonth}:${record.dueDateMillis}`;
+        if (coveredKeys.has(key)) continue;
+        coveredKeys.add(key);
+        items.push({
+          liabilityId: liability.id,
+          liabilityName: liability.name,
+          installmentIndex: -1,
+          amount: record.amount,
+          dueDateMillis: record.dueDateMillis,
+          status: 'done',
+          paymentDateMillis: record.paymentDateMillis,
+          kindLabel: getLiabilityKindLabel(liability),
+          typeLabel: getLiabilityTypeLabel(liability),
+          fromHistory: true,
+        });
+      }
+    }
   }
 
   return items.sort((a, b) => {
@@ -744,36 +790,67 @@ export function settleInstallmentOnLiability(
 export function computeMonthlyLiabilityTotals(liabilities: readonly Liability[]): MonthlyLiabilityBucket[] {
   const map = new Map<string, MonthlyLiabilityBucket>();
 
-  for (const liability of liabilities) {
-    const schedule = mergeLiabilitySchedule(liability);
-    for (const inst of schedule) {
-      const isDone = inst.paymentStatus === 'done' || inst.isPaymentDone;
-      const existing = map.get(inst.monthYear);
-      if (existing) {
-        if (isDone) {
-          existing.doneTotal = round2(existing.doneTotal + inst.amount);
-          existing.doneCount += 1;
-        } else {
-          existing.pendingTotal = round2(existing.pendingTotal + inst.amount);
-          existing.pendingCount += 1;
-          if (inst.isOverdue) existing.overdueCount += 1;
-        }
-        existing.installmentCount += 1;
-        existing.dueDateMillis = Math.min(existing.dueDateMillis, inst.dueDateMillis);
+  const touch = (
+    monthYear: string,
+    label: string,
+    dueDateMillis: number,
+    amount: number,
+    isDone: boolean,
+    isOverdue: boolean
+  ) => {
+    const existing = map.get(monthYear);
+    if (existing) {
+      if (isDone) {
+        existing.doneTotal = round2(existing.doneTotal + amount);
+        existing.doneCount += 1;
       } else {
-        map.set(inst.monthYear, {
-          monthYear: inst.monthYear,
-          label: inst.label,
-          dueDateMillis: inst.dueDateMillis,
-          pendingTotal: isDone ? 0 : round2(inst.amount),
-          doneTotal: isDone ? round2(inst.amount) : 0,
-          total: round2(inst.amount),
-          status: isDone ? 'done' : 'pending',
-          installmentCount: 1,
-          pendingCount: isDone ? 0 : 1,
-          doneCount: isDone ? 1 : 0,
-          overdueCount: !isDone && inst.isOverdue ? 1 : 0,
-        });
+        existing.pendingTotal = round2(existing.pendingTotal + amount);
+        existing.pendingCount += 1;
+        if (isOverdue) existing.overdueCount += 1;
+      }
+      existing.installmentCount += 1;
+      existing.dueDateMillis = Math.min(existing.dueDateMillis, dueDateMillis);
+      return;
+    }
+    map.set(monthYear, {
+      monthYear,
+      label,
+      dueDateMillis,
+      pendingTotal: isDone ? 0 : round2(amount),
+      doneTotal: isDone ? round2(amount) : 0,
+      total: round2(amount),
+      status: isDone ? 'done' : 'pending',
+      installmentCount: 1,
+      pendingCount: isDone ? 0 : 1,
+      doneCount: isDone ? 1 : 0,
+      overdueCount: !isDone && isOverdue ? 1 : 0,
+    });
+  };
+
+  for (const liability of liabilities) {
+    const schedule = normalizeInstallments(mergeLiabilitySchedule(liability));
+    const covered = new Set<string>();
+
+    for (const inst of schedule) {
+      const isDone = isInstallmentPaid(inst);
+      covered.add(`${liability.id}:${inst.monthYear}:${inst.dueDateMillis}`);
+      touch(inst.monthYear, inst.label, inst.dueDateMillis, inst.amount, isDone, Boolean(inst.isOverdue));
+    }
+
+    if (!isLoanLiability(liability)) {
+      for (const record of parsePaymentHistory(liability.paymentHistoryJson)) {
+        const monthYear = monthYearFromMillis(record.dueDateMillis);
+        const key = `${liability.id}:${monthYear}:${record.dueDateMillis}`;
+        if (covered.has(key)) continue;
+        covered.add(key);
+        touch(
+          monthYear,
+          monthLabelFromMillis(record.dueDateMillis),
+          record.dueDateMillis,
+          record.amount,
+          true,
+          false
+        );
       }
     }
   }

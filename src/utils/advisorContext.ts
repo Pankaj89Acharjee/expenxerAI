@@ -10,7 +10,17 @@ import type {
   Subscription,
   UserProfile,
 } from '@/src/types/models';
-import { getLiabilityRemainingAmount, isLiabilityFullyPaid } from '@/src/utils/liabilitySchedule';
+import {
+  getCurrentMonthEmiStatus,
+  getEffectiveLoanEmi,
+  getLiabilityKindLabel,
+  getLiabilityRemainingAmount,
+  getLiabilityTypeLabel,
+  getLoanPaidEmiCount,
+  isLiabilityFullyPaid,
+  isLoanLiability,
+} from '@/src/utils/liabilitySchedule';
+import { isPlannerLinkedExpense } from '@/src/utils/plannerExpenses';
 import { sumActiveBillsMonthly, sumActiveSubscriptionsMonthly, toMonthlyAmount } from '@/src/utils/plannerTotals';
 import { calculateSettlements } from '@/src/utils/settlements';
 import { currentMonthYear, formatDate, parseJsonToMap } from '@/src/utils/format';
@@ -90,6 +100,64 @@ function recurringItems(expenses: Expense[]): string {
     .join('; ');
 }
 
+/** Peer-to-peer borrowing only — not Planner EMI / card loan expense rows. */
+function isPeerBorrowingExpense(expense: Expense): boolean {
+  return expense.category === 'Borrowing' && !isPlannerLinkedExpense(expense);
+}
+
+function formatExpenseRow(expense: Expense): string {
+  const base = `${formatDate(expense.dateMillis)} | ${expense.title} | ₹${expense.amount.toFixed(2)} | ${expense.category}`;
+  if (isPlannerLinkedExpense(expense)) {
+    return `${base} | planner-payment (already recorded; not a peer settlement)`;
+  }
+  // `settled` applies only to informal peer Borrowing paybacks.
+  if (expense.category === 'Borrowing') {
+    return `${base} | settled:${expense.isSettled === true}`;
+  }
+  return base;
+}
+
+function formatLoanLiabilityLine(liability: Liability): string {
+  const kind = getLiabilityKindLabel(liability);
+  const type = getLiabilityTypeLabel(liability);
+  const remaining = getLiabilityRemainingAmount(liability);
+  const closed = isLiabilityFullyPaid(liability);
+
+  if (isLoanLiability(liability)) {
+    const tenure = liability.tenureMonths ?? 0;
+    const paid = getLoanPaidEmiCount(liability);
+    const emi = getEffectiveLoanEmi(liability);
+    const month = getCurrentMonthEmiStatus(liability);
+    const monthStatus = !month.hasEmi
+      ? 'no EMI due this calendar month'
+      : month.isPaid
+        ? `this month EMI PAID on ${formatDate(month.paymentDateMillis!)} (₹${month.amount.toFixed(2)})`
+        : `this month EMI DUE on ${formatDate(month.dueDateMillis!)} (₹${month.amount.toFixed(2)}${month.isOverdue ? ', OVERDUE' : ''})`;
+
+    return [
+      `${liability.name} [${kind} / ${type}]`,
+      closed ? 'STATUS: CLOSED (fully paid)' : 'STATUS: ACTIVE',
+      `EMI ₹${emi.toFixed(2)}/mo`,
+      `progress ${paid}/${tenure} EMIs paid`,
+      `remaining ₹${remaining.toFixed(2)}`,
+      liability.lender ? `lender ${liability.lender}` : null,
+      `first/next due reference ${formatDate(liability.dueDateMillis)}`,
+      monthStatus,
+    ]
+      .filter(Boolean)
+      .join(' | ');
+  }
+
+  return [
+    `${liability.name} [${kind} / ${type}]`,
+    closed ? 'STATUS: CLOSED (fully paid)' : `STATUS: ${liability.isPaid ? 'marked paid this cycle' : 'ACTIVE'}`,
+    `amount ₹${liability.amount.toFixed(2)}`,
+    `remaining ₹${remaining.toFixed(2)}`,
+    `${liability.frequency}`,
+    `due ${formatDate(liability.dueDateMillis)}`,
+  ].join(' | ');
+}
+
 export function buildAdvisorSystemPrompt(input: AdvisorContextInput): string {
   const {
     userProfile,
@@ -114,13 +182,10 @@ export function buildAdvisorSystemPrompt(input: AdvisorContextInput): string {
   const expenseRows = [...expenses]
     .sort((a, b) => b.dateMillis - a.dateMillis)
     .slice(0, 60)
-    .map(
-      (e) =>
-        `${formatDate(e.dateMillis)} | ${e.title} | ₹${e.amount.toFixed(2)} | ${e.category}${e.notes ? ` | ${e.notes}` : ''}${e.isSettled != null ? ` | settled:${e.isSettled}` : ''}`
-    )
+    .map(formatExpenseRow)
     .join('\n');
 
-  const borrowing = expenses.filter((e) => e.category === 'Borrowing' || e.category === 'Credit-card');
+  const borrowing = expenses.filter(isPeerBorrowingExpense);
   const borrowingText =
     borrowing.length === 0
       ? 'None'
@@ -151,22 +216,23 @@ export function buildAdvisorSystemPrompt(input: AdvisorContextInput): string {
     })
     .join('; ');
 
-  const liabilityText = liabilities.length
-    ? liabilities
-        .filter((l) => !isLiabilityFullyPaid(l))
-        .map(
-          (l) =>
-            `${l.name} remaining ₹${getLiabilityRemainingAmount(l).toFixed(2)} of ₹${l.amount.toFixed(2)} | ${l.frequency} | due ${formatDate(l.dueDateMillis)}`
-        )
-        .join('\n')
-    : 'None';
+  const activeLiabilities = liabilities.filter((l) => !isLiabilityFullyPaid(l));
+  const closedLiabilities = liabilities.filter((l) => isLiabilityFullyPaid(l)).slice(0, 10);
+
+  const liabilityText = activeLiabilities.length
+    ? activeLiabilities.map(formatLoanLiabilityLine).join('\n')
+    : 'None active';
+
+  const closedLiabilityText = closedLiabilities.length
+    ? closedLiabilities.map(formatLoanLiabilityLine).join('\n')
+    : 'None recently closed in tracker';
 
   const subText = subscriptions.length
     ? subscriptions
         .filter((s) => s.isActive)
         .map(
           (s) =>
-            `${s.name} ₹${toMonthlyAmount(s.cost, s.billingCycle).toFixed(2)}/mo equiv (₹${s.cost}/${s.billingCycle}) | next ${formatDate(s.nextPaymentMillis)} | ${s.category}`
+            `${s.name} ₹${toMonthlyAmount(s.cost, s.billingCycle).toFixed(2)}/mo equiv (₹${s.cost}/${s.billingCycle}) | next ${formatDate(s.nextPaymentMillis)} | ${s.category}${s.lastPaidMillis ? ` | last paid ${formatDate(s.lastPaidMillis)}` : ''}`
         )
         .join('; ')
     : 'None';
@@ -176,7 +242,7 @@ export function buildAdvisorSystemPrompt(input: AdvisorContextInput): string {
         .filter((b) => b.isActive)
         .map(
           (b) =>
-            `${b.name} ₹${toMonthlyAmount(b.amount, b.billingCycle).toFixed(2)}/mo equiv (₹${b.amount}/${b.billingCycle}) | next ${formatDate(b.nextPaymentMillis)} | ${b.category}`
+            `${b.name} ₹${toMonthlyAmount(b.amount, b.billingCycle).toFixed(2)}/mo equiv (₹${b.amount}/${b.billingCycle}) | next ${formatDate(b.nextPaymentMillis)} | ${b.category}${b.lastPaidMillis ? ` | last paid ${formatDate(b.lastPaidMillis)}` : ''}`
         )
         .join('; ')
     : 'None';
@@ -213,6 +279,11 @@ export function buildAdvisorSystemPrompt(input: AdvisorContextInput): string {
 Use the financial data below to answer questions about trends, comparisons, budgets, liabilities, borrowing, and group splits.
 When citing amounts use ₹ (INR). Today is ${formatDate(Date.now(), 'full')}. Current month: ${monthYear}.
 
+IMPORTANT RULES FOR LOANS / EMIs:
+- Use the LIABILITIES sections for loan/EMI status (ACTIVE vs CLOSED, EMIs paid, remaining, this-month paid/due).
+- Expense rows tagged "planner-payment" are EMI/bill/subscription payment logs. Do NOT treat them as unsettled peer debts.
+- The field settled:true/false applies ONLY to informal peer Borrowing paybacks — never to bank loans or credit-card EMI plans.
+
 === INCOME ===
 Monthly Income: ₹${userIncome}
 This month spent: ₹${thisMonthExpenses.reduce((s, e) => s + e.amount, 0).toFixed(2)} | Remaining: ₹${Math.max(userIncome - thisMonthExpenses.reduce((s, e) => s + e.amount, 0), 0).toFixed(2)}
@@ -234,11 +305,14 @@ ${budgetLines || 'No budgets set for this month'}
 === BUDGET TEMPLATES ===
 ${templateLines || 'None saved'}
 
-=== BORROWING / SETTLEMENT ===
+=== PEER BORROWING / SETTLEMENT (informal only) ===
 ${borrowingText}
 
-=== LIABILITIES ===
+=== ACTIVE LOANS / LIABILITIES (live Planner data) ===
 ${liabilityText}
+
+=== CLOSED / FULLY PAID LOANS & LIABILITIES ===
+${closedLiabilityText}
 
 === SUBSCRIPTIONS (active, monthly equivalent) ===
 ${subText}
@@ -254,5 +328,5 @@ ${goalsText}
 === GROUP / SPLIT EXPENSES ===
 ${groupLines}
 
-Analyse this context and respond with actionable FinTech intelligence. For trend or year-over-year questions, use the monthly totals and individual expense rows.`;
+Analyse this context and respond with actionable FinTech intelligence. For trend or year-over-year questions, use the monthly totals and individual expense rows. For loan questions, prefer ACTIVE/CLOSED LIABILITIES over expense settled flags.`;
 }
