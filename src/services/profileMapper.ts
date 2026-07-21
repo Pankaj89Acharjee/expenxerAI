@@ -26,6 +26,7 @@ export function profileToFirestore(profile: UserProfile): Record<string, unknown
     state: profile.state ?? null,
     areaOfInterest: profile.areaOfInterest ?? null,
     splitwiseHandle: profile.splitwiseHandle ?? null,
+    expoPushToken: profile.expoPushToken ?? null,
   };
 }
 
@@ -48,5 +49,6 @@ export function profileFromFirestore(data: Record<string, unknown>): UserProfile
     state: (data.state as string | null) ?? null,
     areaOfInterest: (data.areaOfInterest as string | null) ?? null,
     splitwiseHandle: (data.splitwiseHandle as string | null) ?? null,
+    expoPushToken: (data.expoPushToken as string | null) ?? null,
   };
 }

@@ -871,15 +871,20 @@ export default function DashboardScreen() {
                     ]}
                     onPress={() => goToPlannerTab('Subscriptions')}
                   >
-                    <View style={styles.liabilityMonthItemTop}>
-                      <Text style={[styles.liabilityMonthLabel, styles.sectionOnDark]} numberOfLines={1}>
-                        {item.name}
+                    <View
+                      style={[
+                        styles.liabilityMonthStatusBadge,
+                        { backgroundColor: statusMeta.color, alignSelf: 'flex-start' },
+                      ]}
+                    >
+                      <Text style={styles.liabilityMonthStatusText} numberOfLines={1}>
+                        {statusMeta.label}
                       </Text>
-                      <View style={[styles.liabilityMonthStatusBadge, { backgroundColor: statusMeta.color }]}>
-                        <Text style={styles.liabilityMonthStatusText}>{statusMeta.label}</Text>
-                      </View>
                     </View>
-                    <Text style={[styles.liabilityMonthAmount, { color: statusMeta.color }]}>
+                    <Text style={[styles.liabilityMonthLabel, styles.sectionOnDark]} numberOfLines={1}>
+                      {item.name}
+                    </Text>
+                    <Text style={[styles.liabilityMonthAmount, { color: statusMeta.color }]} numberOfLines={1}>
                       {formatCurrency(item.amount)}
                     </Text>
                     <Text style={[styles.sectionMuted, { fontSize: 10, marginTop: 4 }]} numberOfLines={1}>
@@ -972,15 +977,20 @@ export default function DashboardScreen() {
                     ]}
                     onPress={() => goToPlannerTab('Bills')}
                   >
-                    <View style={styles.liabilityMonthItemTop}>
-                      <Text style={[styles.liabilityMonthLabel, styles.sectionOnDark]} numberOfLines={1}>
-                        {item.name}
+                    <View
+                      style={[
+                        styles.liabilityMonthStatusBadge,
+                        { backgroundColor: statusMeta.color, alignSelf: 'flex-start' },
+                      ]}
+                    >
+                      <Text style={styles.liabilityMonthStatusText} numberOfLines={1}>
+                        {statusMeta.label}
                       </Text>
-                      <View style={[styles.liabilityMonthStatusBadge, { backgroundColor: statusMeta.color }]}>
-                        <Text style={styles.liabilityMonthStatusText}>{statusMeta.label}</Text>
-                      </View>
                     </View>
-                    <Text style={[styles.liabilityMonthAmount, { color: statusMeta.color }]}>
+                    <Text style={[styles.liabilityMonthLabel, styles.sectionOnDark]} numberOfLines={1}>
+                      {item.name}
+                    </Text>
+                    <Text style={[styles.liabilityMonthAmount, { color: statusMeta.color }]} numberOfLines={1}>
                       {formatCurrency(item.amount)}
                     </Text>
                     <Text style={[styles.sectionMuted, { fontSize: 10, marginTop: 4 }]} numberOfLines={1}>
@@ -1660,18 +1670,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     paddingHorizontal: 10,
     paddingVertical: 10,
-  },
-  liabilityMonthItemTop: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    gap: 6,
+    overflow: 'hidden',
   },
   liabilityMonthStatusBadge: {
     borderRadius: 999,
     paddingHorizontal: 7,
     paddingVertical: 2,
     marginBottom: 6,
+    maxWidth: '100%',
+    flexShrink: 1,
   },
   liabilityMonthStatusText: { color: '#fff', fontSize: 9, fontWeight: '800' },
   liabilityMonthLabel: { fontSize: 13, fontWeight: '800', letterSpacing: 0.2 },

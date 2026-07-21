@@ -1,5 +1,6 @@
 import { MaterialIcons } from '@expo/vector-icons';
 import DateTimePicker, { type DateTimePickerChangeEvent } from '@react-native-community/datetimepicker';
+import * as ImagePicker from 'expo-image-picker';
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -19,6 +20,7 @@ import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColorScheme } from '@/components/useColorScheme';
 import { KeyboardModalShell } from '@/src/components/KeyboardModalShell';
+import { SplitGroupAvatar, SplitGroupAvatarPickerPreview } from '@/src/components/SplitGroupAvatar';
 import { useFinancialStore } from '@/src/store/useFinancialStore';
 import { buildActiveMemberFromProfile, buildGuestMember } from '@/src/services/splitGroupsCloud';
 import { getFirebaseAuth } from '@/src/services/firebase';
@@ -34,6 +36,7 @@ import {
 } from '@/src/utils/expenseDateRange';
 import {
   buildMemberBalanceCards,
+  calculateNetBalances,
   calculateSettlements,
   describeBorrowFlow,
   type MemberBalanceCard,
@@ -58,10 +61,14 @@ const GroupExpenseRow = memo(function GroupExpenseRow({
   item,
   colors,
   memberNames,
+  onPress,
+  onLongPress,
 }: {
   item: GroupExpense;
   colors: ThemeColors;
   memberNames: string[];
+  onPress: (item: GroupExpense) => void;
+  onLongPress: (item: GroupExpense) => void;
 }) {
   const payers = getGroupExpensePayers(item).join(', ') || item.paidBy;
   const splitAmong = getGroupExpenseSplitAmong(item, memberNames);
@@ -70,15 +77,24 @@ const GroupExpenseRow = memo(function GroupExpenseRow({
       ? 'everyone'
       : splitAmong.join(', ');
   return (
-    <View style={[styles.expenseItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
+    <Pressable
+      style={[styles.expenseItem, { backgroundColor: colors.card, borderColor: colors.border }]}
+      onPress={() => onPress(item)}
+      onLongPress={() => onLongPress(item)}
+    >
       <View style={{ flex: 1 }}>
         <Text style={[styles.itemName, { color: colors.text }]}>{item.title}</Text>
         <Text style={{ color: colors.textMuted, fontSize: 12 }}>
           Paid by {payers} · for {forLabel} • {formatDate(item.dateMillis)}
         </Text>
+        {item.notes ? (
+          <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 2 }} numberOfLines={1}>
+            {item.notes}
+          </Text>
+        ) : null}
       </View>
       <Text style={{ color: colors.primary, fontWeight: '700' }}>{formatCurrency(item.amount)}</Text>
-    </View>
+    </Pressable>
   );
 });
 
@@ -162,7 +178,7 @@ const GroupListRow = memo(function GroupListRow({
       style={[styles.groupCard, { backgroundColor: colors.card, borderColor: colors.border }]}
       onPress={() => onPress(item.id)}
     >
-      <Text style={{ fontSize: 28 }}>👥</Text>
+      <SplitGroupAvatar photoUrl={item.photoUrl} size={52} />
       <View style={{ flex: 1, marginLeft: 12 }}>
         <Text style={[styles.itemName, { color: colors.text }]}>{item.name}</Text>
         {admin ? (
@@ -195,20 +211,33 @@ export default function SplitScreen() {
   const groupExpenses = useFinancialStore((s) => s.groupExpenses);
   const selectGroup = useFinancialStore((s) => s.selectGroup);
   const createGroup = useFinancialStore((s) => s.createGroup);
+  const updateSplitGroupPhoto = useFinancialStore((s) => s.updateSplitGroupPhoto);
+  const renameSplitGroup = useFinancialStore((s) => s.renameSplitGroup);
   const addGroupExpense = useFinancialStore((s) => s.addGroupExpense);
+  const updateGroupExpense = useFinancialStore((s) => s.updateGroupExpense);
+  const deleteGroupExpense = useFinancialStore((s) => s.deleteGroupExpense);
   const searchSplitUsers = useFinancialStore((s) => s.searchSplitUsers);
   const inviteToGroupViaWhatsApp = useFinancialStore((s) => s.inviteToGroupViaWhatsApp);
   const markSplitSettlementPaid = useFinancialStore((s) => s.markSplitSettlementPaid);
+  const undoSplitSettlement = useFinancialStore((s) => s.undoSplitSettlement);
   const removeSplitMember = useFinancialStore((s) => s.removeSplitMember);
   const leaveSplitGroup = useFinancialStore((s) => s.leaveSplitGroup);
+  const setSplitGroupArchived = useFinancialStore((s) => s.setSplitGroupArchived);
+  const revokeSplitInviteCode = useFinancialStore((s) => s.revokeSplitInviteCode);
   const groupSettlements = useFinancialStore((s) => s.groupSettlements);
   const profile = useFinancialStore((s) => s.userProfile);
   const currentUid = getFirebaseAuth().currentUser?.uid ?? null;
 
   const [showCreate, setShowCreate] = useState(false);
   const [showAddExpense, setShowAddExpense] = useState(false);
+  const [editingExpense, setEditingExpense] = useState<GroupExpense | null>(null);
   const [showInvite, setShowInvite] = useState(false);
+  const [showRename, setShowRename] = useState(false);
+  const [renameDraft, setRenameDraft] = useState('');
   const [groupName, setGroupName] = useState('');
+  const [createPhotoUri, setCreatePhotoUri] = useState<string | null>(null);
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [uploadingGroupPhoto, setUploadingGroupPhoto] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchHits, setSearchHits] = useState<UserDirectoryHit[]>([]);
   const [searching, setSearching] = useState(false);
@@ -237,6 +266,25 @@ export default function SplitScreen() {
   /** null = all members; otherwise filter expenses by who paid. */
   const [spendMemberFilter, setSpendMemberFilter] = useState<string | null>(null);
 
+  // Feature 1: expense backdate + notes
+  const [expNotes, setExpNotes] = useState('');
+  const [expDate, setExpDate] = useState(() => startOfDay(Date.now()));
+  const [showExpDatePicker, setShowExpDatePicker] = useState(false);
+
+  // Feature 2: partial settlement modal
+  const [showSettleModal, setShowSettleModal] = useState(false);
+  const [settleFlow, setSettleFlow] = useState<DebtFlow | null>(null);
+  const [settleAmount, setSettleAmount] = useState('');
+  const [settleNote, setSettleNote] = useState('');
+
+  // Feature 4: group search + archive tabs
+  const [groupSearch, setGroupSearch] = useState('');
+  const [groupTab, setGroupTab] = useState<'active' | 'archived'>('active');
+
+  // Feature 5: invite revoke
+  const [revokeCode, setRevokeCode] = useState('');
+  const [revoking, setRevoking] = useState(false);
+
   const currentGroup = useMemo(
     () => groups.find((g) => g.id === selectedGroupId) ?? null,
     [groups, selectedGroupId]
@@ -261,11 +309,6 @@ export default function SplitScreen() {
   const filteredGroupExpenses = useMemo(
     () => groupExpenses.filter((e) => isExpenseInRange(e.dateMillis, expenseRange)),
     [groupExpenses, expenseRange]
-  );
-
-  const filteredRecordedSettlements = useMemo(
-    () => groupSettlements.filter((s) => isExpenseInRange(s.dateMillis, expenseRange)),
-    [groupSettlements, expenseRange]
   );
 
   const periodSpendTotal = useMemo(
@@ -297,13 +340,19 @@ export default function SplitScreen() {
 
   const memberBalanceCards = useMemo(() => {
     if (!currentGroup) return [] as MemberBalanceCard[];
-    return buildMemberBalanceCards(memberNames, filteredGroupExpenses, filteredRecordedSettlements);
-  }, [currentGroup, memberNames, filteredGroupExpenses, filteredRecordedSettlements]);
+    // Always use full history for balances / settle-up (period filter is for expense list only).
+    return buildMemberBalanceCards(memberNames, groupExpenses, groupSettlements);
+  }, [currentGroup, memberNames, groupExpenses, groupSettlements]);
 
   const settlements = useMemo(() => {
     if (!currentGroup) return [] as DebtFlow[];
-    return calculateSettlements(memberNames, filteredGroupExpenses, filteredRecordedSettlements);
-  }, [currentGroup, filteredGroupExpenses, memberNames, filteredRecordedSettlements]);
+    return calculateSettlements(memberNames, groupExpenses, groupSettlements);
+  }, [currentGroup, groupExpenses, memberNames, groupSettlements]);
+
+  const memberNetBalances = useMemo(() => {
+    if (!currentGroup) return {} as Record<string, number>;
+    return calculateNetBalances(memberNames, groupExpenses, groupSettlements);
+  }, [currentGroup, memberNames, groupExpenses, groupSettlements]);
 
   const mySettlementFlows = useMemo(() => {
     if (!selfDisplayName) return settlements;
@@ -340,74 +389,195 @@ export default function SplitScreen() {
     if (Platform.OS === 'android') setShowCustomEndPicker(false);
   };
 
+  const handleExpDateChange = (_event: DateTimePickerChangeEvent, date?: Date) => {
+    if (!date) return;
+    setExpDate(startOfDay(date.getTime()));
+    if (Platform.OS === 'android') setShowExpDatePicker(false);
+  };
+
   const periodButtonLabel = timePeriod === 'custom' ? expenseRange.label : activePeriod.shortLabel;
 
   const handleMarkPaid = useCallback(
     (flow: DebtFlow) => {
       if (!currentGroup) return;
-      const isBorrower = Boolean(selfDisplayName && flow.debtor === selfDisplayName);
-      const message = isBorrower
-        ? `Record that you paid ${flow.creditor} ${formatCurrency(flow.amount)}? This will also add a Split expense to your Expenses and Dashboard.`
-        : `Record that ${flow.debtor} paid ${flow.creditor} ${formatCurrency(flow.amount)}?`;
-      Alert.alert('Settle payment?', message, [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Settle',
-          onPress: () => {
-            void (async () => {
-              const error = await markSplitSettlementPaid(currentGroup.id, flow);
-              if (error) Alert.alert('Could not settle', error);
-            })();
-          },
-        },
-      ]);
+      setSettleFlow(flow);
+      setSettleAmount(String(flow.amount));
+      setSettleNote('');
+      setShowSettleModal(true);
     },
-    [currentGroup, markSplitSettlementPaid, selfDisplayName]
+    [currentGroup]
   );
+
+  const handleConfirmSettle = useCallback(async () => {
+    if (!currentGroup || !settleFlow) return;
+    const amt = parseFloat(settleAmount);
+    if (isNaN(amt) || amt <= 0) {
+      Alert.alert('Invalid amount', 'Amount must be greater than 0.');
+      return;
+    }
+    if (amt > settleFlow.amount + 0.01) {
+      Alert.alert('Too much', `Cannot settle more than ${formatCurrency(settleFlow.amount)}.`);
+      return;
+    }
+    setShowSettleModal(false);
+    const error = await markSplitSettlementPaid(
+      currentGroup.id,
+      { ...settleFlow, amount: amt },
+      settleNote.trim() || undefined
+    );
+    if (error) Alert.alert('Could not settle', error);
+    setSettleFlow(null);
+  }, [currentGroup, settleFlow, settleAmount, settleNote, markSplitSettlementPaid]);
 
   const handleRemoveMember = useCallback(
     (member: SplitMember) => {
       if (!currentGroup) return;
-      Alert.alert('Remove member?', `Remove ${member.displayName} from this group?`, [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Remove',
-          style: 'destructive',
-          onPress: () => {
-            void (async () => {
-              const error = await removeSplitMember(currentGroup.id, member.id);
-              if (error) Alert.alert('Could not remove', error);
-            })();
+      const bal = memberNetBalances[member.displayName] ?? 0;
+      const outstanding =
+        Math.abs(bal) > 0.01
+          ? `\n\nThey still have an outstanding balance of ${bal > 0 ? '+' : '−'}${formatCurrency(Math.abs(bal))} (${bal > 0 ? 'lent' : 'borrowed'}).`
+          : '';
+      Alert.alert(
+        'Remove member?',
+        `Remove ${member.displayName} from this group?${outstanding}`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Remove',
+            style: 'destructive',
+            onPress: () => {
+              void (async () => {
+                const error = await removeSplitMember(currentGroup.id, member.id);
+                if (error) Alert.alert('Could not remove', error);
+              })();
+            },
           },
-        },
-      ]);
+        ]
+      );
     },
-    [currentGroup, removeSplitMember]
+    [currentGroup, removeSplitMember, memberNetBalances]
   );
 
   const handleLeaveGroup = useCallback(() => {
     if (!currentGroup) return;
-    Alert.alert('Leave group?', `Leave "${currentGroup.name}"? You will lose access until invited again.`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Leave',
-        style: 'destructive',
-        onPress: () => {
-          void (async () => {
-            const error = await leaveSplitGroup(currentGroup.id);
-            if (error) Alert.alert('Could not leave', error);
-          })();
+    const selfName =
+      currentGroup.members.find((m) => m.uid === currentUid)?.displayName ?? null;
+    const bal = selfName ? memberNetBalances[selfName] ?? 0 : 0;
+    const outstanding =
+      Math.abs(bal) > 0.01
+        ? `\n\nYou still have an outstanding balance of ${bal > 0 ? '+' : '−'}${formatCurrency(Math.abs(bal))} (${bal > 0 ? 'lent' : 'borrowed'}). Settle up first if you can.`
+        : '';
+    Alert.alert(
+      'Leave group?',
+      `Leave "${currentGroup.name}"? You will lose access until invited again.${outstanding}`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Leave anyway',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              const error = await leaveSplitGroup(currentGroup.id);
+              if (error) Alert.alert('Could not leave', error);
+            })();
+          },
         },
-      },
-    ]);
-  }, [currentGroup, leaveSplitGroup]);
+      ]
+    );
+  }, [currentGroup, leaveSplitGroup, currentUid, memberNetBalances]);
+
+  const handleRenameGroup = useCallback(() => {
+    if (!currentGroup) return;
+    if (!isGroupAdmin(currentGroup, currentUid)) {
+      Alert.alert('Admin only', 'Only the group Admin can rename the group.');
+      return;
+    }
+    setRenameDraft(currentGroup.name);
+    setShowRename(true);
+  }, [currentGroup, currentUid]);
+
+  const submitRename = async () => {
+    if (!currentGroup) return;
+    const error = await renameSplitGroup(currentGroup.id, renameDraft);
+    if (error) {
+      Alert.alert('Could not rename', error);
+      return;
+    }
+    setShowRename(false);
+  };
 
   const expenseKeyExtractor = useCallback((item: GroupExpense) => String(item.id), []);
   const groupKeyExtractor = useCallback((item: SplitGroup) => String(item.id), []);
 
+  const openEditExpense = useCallback(
+    (item: GroupExpense) => {
+      if (!currentGroup) return;
+      setEditingExpense(item);
+      setExpTitle(item.title);
+      setExpAmount(String(item.amount));
+      const payerIds = (item.paidByMemberIds?.length
+        ? item.paidByMemberIds
+        : currentGroup.members
+            .filter((m) => getGroupExpensePayers(item).includes(m.displayName))
+            .map((m) => m.id)) as string[];
+      setPaidById(payerIds[0] ?? null);
+      const forIds = (item.splitAmongMemberIds?.length
+        ? item.splitAmongMemberIds
+        : currentGroup.members
+            .filter((m) => getGroupExpenseSplitAmong(item, memberNames).includes(m.displayName))
+            .map((m) => m.id)) as string[];
+      setPaidForIds(forIds.length ? forIds : currentGroup.members.map((m) => m.id));
+      setPaidByOpen(false);
+      setPaidForOpen(false);
+      setExpNotes(item.notes ?? '');
+      setExpDate(item.dateMillis ? startOfDay(item.dateMillis) : startOfDay(Date.now()));
+      setShowExpDatePicker(false);
+      setShowAddExpense(true);
+    },
+    [currentGroup, memberNames]
+  );
+
+  const handleExpenseLongPress = useCallback(
+    (item: GroupExpense) => {
+      if (!currentGroup) return;
+      Alert.alert(item.title, 'Choose an action', [
+        { text: 'Edit', onPress: () => openEditExpense(item) },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            Alert.alert('Delete expense?', `Remove "${item.title}" (${formatCurrency(item.amount)})?`, [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: 'Delete',
+                style: 'destructive',
+                onPress: () => {
+                  void (async () => {
+                    const error = await deleteGroupExpense(currentGroup.id, item.id);
+                    if (error) Alert.alert('Could not delete', error);
+                  })();
+                },
+              },
+            ]);
+          },
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    },
+    [currentGroup, openEditExpense, deleteGroupExpense]
+  );
+
   const renderExpenseItem = useCallback<ListRenderItem<GroupExpense>>(
-    ({ item }) => <GroupExpenseRow item={item} colors={colors} memberNames={memberNames} />,
-    [colors, memberNames]
+    ({ item }) => (
+      <GroupExpenseRow
+        item={item}
+        colors={colors}
+        memberNames={memberNames}
+        onPress={openEditExpense}
+        onLongPress={handleExpenseLongPress}
+      />
+    ),
+    [colors, memberNames, openEditExpense, handleExpenseLongPress]
   );
 
   const onSelectGroup = useCallback(
@@ -559,7 +729,8 @@ export default function SplitScreen() {
           <View style={[styles.settleCard, { backgroundColor: colors.emeraldSoft, borderColor: colors.emeraldText }]}>
             <Text style={[styles.settleTitle, { color: colors.emeraldText }]}>SETTLE UP</Text>
             <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 4 }}>
-              Settle what you borrowed. Lender or Admin can also confirm a payment.
+              Based on all-time balances (not the period filter). Settle what you borrowed. Lender or
+              Admin can also confirm.
             </Text>
             {mySettlementFlows.length > 0 ? (
               <>
@@ -633,6 +804,50 @@ export default function SplitScreen() {
                 </>
               );
             })()}
+
+            {groupSettlements.length > 0 ? (
+              <>
+                <Text style={[styles.sectionLabel, { color: colors.text, marginTop: 14 }]}>Recent payments</Text>
+                {groupSettlements.slice(0, 5).map((s) => (
+                  <View key={s.id} style={styles.settleRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: colors.text, fontSize: 13 }}>
+                        {s.debtor} → {s.creditor} · {formatCurrency(s.amount)}
+                      </Text>
+                      {s.note ? (
+                        <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 1 }}>{s.note}</Text>
+                      ) : null}
+                      <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 1 }}>
+                        {formatDate(s.dateMillis)}
+                      </Text>
+                    </View>
+                    {(isAdmin || s.debtor === selfDisplayName || s.creditor === selfDisplayName) ? (
+                      <Pressable
+                        style={[styles.markPaidChip, { backgroundColor: colors.surfaceVariant, borderWidth: 1, borderColor: colors.border }]}
+                        onPress={() => {
+                          if (!currentGroup) return;
+                          Alert.alert('Undo payment?', `Remove the recorded payment of ${formatCurrency(s.amount)} from ${s.debtor} to ${s.creditor}?`, [
+                            { text: 'Cancel', style: 'cancel' },
+                            {
+                              text: 'Undo',
+                              style: 'destructive',
+                              onPress: () => {
+                                void (async () => {
+                                  const error = await undoSplitSettlement(currentGroup.id, s.id);
+                                  if (error) Alert.alert('Could not undo', error);
+                                })();
+                              },
+                            },
+                          ]);
+                        }}
+                      >
+                        <Text style={{ color: colors.error, fontWeight: '700', fontSize: 11 }}>Undo</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                ))}
+              </>
+            ) : null}
           </View>
         ) : null}
 
@@ -739,6 +954,8 @@ export default function SplitScreen() {
     spendMemberFilter,
     expenseRange.label,
     periodButtonLabel,
+    groupSettlements,
+    undoSplitSettlement,
   ]);
 
   useEffect(() => {
@@ -771,12 +988,83 @@ export default function SplitScreen() {
     setSelectedMembers([]);
     setGuestName('');
     setGuestPhone('');
+    setCreatePhotoUri(null);
+  };
+
+  const pickGroupPhoto = async (): Promise<string | null> => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'Allow photo access to set a group image.');
+      return null;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.85,
+    });
+    if (result.canceled || !result.assets[0]?.uri) return null;
+    return result.assets[0].uri;
+  };
+
+  const handlePickCreatePhoto = async () => {
+    const uri = await pickGroupPhoto();
+    if (uri) setCreatePhotoUri(uri);
+  };
+
+  const handleChangeGroupPhoto = useCallback(() => {
+    if (!currentGroup) return;
+    const isAdmin = isGroupAdmin(currentGroup, currentUid);
+    if (!isAdmin) {
+      Alert.alert('Admin only', 'Only the group Admin can change the group photo.');
+      return;
+    }
+    Alert.alert('Group photo', 'Choose an option', [
+      {
+        text: 'Upload photo',
+        onPress: () => {
+          void (async () => {
+            const uri = await pickGroupPhoto();
+            if (!uri) return;
+            setUploadingGroupPhoto(true);
+            const error = await updateSplitGroupPhoto(currentGroup.id, uri);
+            setUploadingGroupPhoto(false);
+            if (error) Alert.alert('Upload failed', error);
+          })();
+        },
+      },
+      {
+        text: 'Use default',
+        onPress: () => {
+          void (async () => {
+            setUploadingGroupPhoto(true);
+            const error = await updateSplitGroupPhoto(currentGroup.id, null);
+            setUploadingGroupPhoto(false);
+            if (error) Alert.alert('Could not reset', error);
+          })();
+        },
+      },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [currentGroup, currentUid, updateSplitGroupPhoto]);
+
+  const handleCreate = async () => {
+    if (!groupName.trim() || selectedMembers.length === 0) return;
+    setCreatingGroup(true);
+    try {
+      await createGroup(groupName.trim(), selectedMembers, createPhotoUri);
+      setShowCreate(false);
+      resetCreateForm();
+    } finally {
+      setCreatingGroup(false);
+    }
   };
 
   const resetInviteForm = () => {
     setInviteName('');
     setInvitePhone('');
     setInviteMemberId(null);
+    setRevokeCode('');
   };
 
   const addRegisteredHit = (hit: UserDirectoryHit) => {
@@ -818,27 +1106,36 @@ export default function SplitScreen() {
       Alert.alert('Name required', 'Enter the person’s name for the invite.');
       return;
     }
-    setInviting(true);
-    const error = await inviteToGroupViaWhatsApp({
-      groupId: currentGroup.id,
-      displayName: name,
-      phoneNumber: invitePhone.trim() || null,
-      existingMemberId: inviteMemberId,
-    });
-    setInviting(false);
-    if (error) {
-      Alert.alert('Invite failed', error);
+    const phone = invitePhone.trim();
+    const send = async () => {
+      setInviting(true);
+      const error = await inviteToGroupViaWhatsApp({
+        groupId: currentGroup.id,
+        displayName: name,
+        phoneNumber: phone || null,
+        existingMemberId: inviteMemberId,
+      });
+      setInviting(false);
+      if (error) {
+        Alert.alert('Invite failed', error);
+        return;
+      }
+      setShowInvite(false);
+      resetInviteForm();
+    };
+
+    if (!phone) {
+      Alert.alert(
+        'No phone number',
+        'Without a phone/email they can only join via the invite link you share. Continue?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Continue', onPress: () => void send() },
+        ]
+      );
       return;
     }
-    setShowInvite(false);
-    resetInviteForm();
-  };
-
-  const handleCreate = async () => {
-    if (!groupName.trim() || selectedMembers.length === 0) return;
-    await createGroup(groupName.trim(), selectedMembers);
-    setShowCreate(false);
-    resetCreateForm();
+    await send();
   };
 
   const resetExpenseForm = () => {
@@ -848,10 +1145,17 @@ export default function SplitScreen() {
     setPaidByOpen(false);
     setPaidForIds([]);
     setPaidForOpen(false);
+    setEditingExpense(null);
+    setExpNotes('');
+    setExpDate(startOfDay(Date.now()));
+    setShowExpDatePicker(false);
   };
 
   const openAddExpense = () => {
     if (!currentGroup) return;
+    setEditingExpense(null);
+    setExpTitle('');
+    setExpAmount('');
     const self =
       currentGroup.members.find((m) => m.uid && m.uid === currentUid) ??
       currentGroup.members.find(
@@ -866,6 +1170,9 @@ export default function SplitScreen() {
     setPaidForIds(currentGroup.members.map((m) => m.id));
     setPaidByOpen(false);
     setPaidForOpen(false);
+    setExpNotes('');
+    setExpDate(startOfDay(Date.now()));
+    setShowExpDatePicker(false);
     setShowAddExpense(true);
   };
 
@@ -879,7 +1186,33 @@ export default function SplitScreen() {
       .filter((m) => paidForIds.includes(m.id))
       .map((m) => m.displayName);
     if (forNames.length === 0) return;
-    await addGroupExpense(currentGroup.id, expTitle.trim(), amt, [payer.displayName], forNames);
+
+    if (editingExpense) {
+      const error = await updateGroupExpense(
+        currentGroup.id,
+        editingExpense.id,
+        expTitle.trim(),
+        amt,
+        [payer.displayName],
+        forNames,
+        expNotes.trim() || undefined,
+        expDate
+      );
+      if (error) {
+        Alert.alert('Could not update', error);
+        return;
+      }
+    } else {
+      await addGroupExpense(
+        currentGroup.id,
+        expTitle.trim(),
+        amt,
+        [payer.displayName],
+        forNames,
+        expNotes.trim() || undefined,
+        expDate
+      );
+    }
     setShowAddExpense(false);
     resetExpenseForm();
   };
@@ -890,6 +1223,15 @@ export default function SplitScreen() {
     );
   };
 
+  const filteredGroups = useMemo(() => {
+    const q = groupSearch.trim().toLowerCase();
+    return groups.filter((g) => {
+      const matchesTab = groupTab === 'active' ? !g.archivedAtMillis : Boolean(g.archivedAtMillis);
+      const matchesSearch = !q || g.name.toLowerCase().includes(q);
+      return matchesTab && matchesSearch;
+    });
+  }, [groups, groupTab, groupSearch]);
+
   if (selectedGroupId && currentGroup) {
     const admin = resolveGroupAdmin(currentGroup);
     return (
@@ -898,8 +1240,26 @@ export default function SplitScreen() {
           <Pressable onPress={() => selectGroup(null)}>
             <Text style={{ color: colors.primary, fontSize: 18 }}>←</Text>
           </Pressable>
-          <View style={{ flex: 1, marginLeft: 8 }}>
-            <Text style={[styles.groupTitle, { color: colors.text }]}>{currentGroup.name}</Text>
+          <Pressable
+            onPress={handleChangeGroupPhoto}
+            disabled={uploadingGroupPhoto}
+            style={styles.detailAvatarWrap}
+          >
+            <SplitGroupAvatar photoUrl={currentGroup.photoUrl} size={44} />
+            {uploadingGroupPhoto ? (
+              <View style={styles.avatarBusy}>
+                <ActivityIndicator size="small" color="#fff" />
+              </View>
+            ) : isGroupAdmin(currentGroup, currentUid) ? (
+              <View style={styles.avatarEditBadge}>
+                <MaterialIcons name="photo-camera" size={12} color="#fff" />
+              </View>
+            ) : null}
+          </Pressable>
+          <View style={{ flex: 1, marginLeft: 10 }}>
+            <Pressable onPress={handleRenameGroup} onLongPress={handleRenameGroup}>
+              <Text style={[styles.groupTitle, { color: colors.text }]}>{currentGroup.name}</Text>
+            </Pressable>
             {admin ? (
               <View style={[styles.memberNameRow, { marginTop: 2 }]}>
                 <View style={[styles.adminPill, { backgroundColor: colors.primary }]}>
@@ -919,6 +1279,36 @@ export default function SplitScreen() {
               onPress={() => openInviteForMember()}
             >
               <Text style={{ color: colors.primary, fontWeight: '700', fontSize: 12 }}>Invite</Text>
+            </Pressable>
+          ) : null}
+          {isGroupAdmin(currentGroup, currentUid) ? (
+            <Pressable
+              style={[styles.headerInviteBtn, { borderColor: currentGroup.archivedAtMillis ? colors.emeraldText : colors.textMuted }]}
+              onPress={() => {
+                const willArchive = !currentGroup.archivedAtMillis;
+                Alert.alert(
+                  willArchive ? 'Archive group?' : 'Unarchive group?',
+                  willArchive
+                    ? `Archive "${currentGroup.name}"? It will be hidden from the active list.`
+                    : `Unarchive "${currentGroup.name}"? It will reappear in the active list.`,
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: willArchive ? 'Archive' : 'Unarchive',
+                      onPress: () => {
+                        void (async () => {
+                          const error = await setSplitGroupArchived(currentGroup.id, willArchive);
+                          if (error) Alert.alert('Could not update', error);
+                        })();
+                      },
+                    },
+                  ]
+                );
+              }}
+            >
+              <Text style={{ color: currentGroup.archivedAtMillis ? colors.emeraldText : colors.textMuted, fontWeight: '700', fontSize: 12 }}>
+                {currentGroup.archivedAtMillis ? 'Unarchive' : 'Archive'}
+              </Text>
             </Pressable>
           ) : null}
         </View>
@@ -968,7 +1358,9 @@ export default function SplitScreen() {
                 ]}
               >
                 <View style={[styles.modalCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-                  <Text style={[styles.modalTitle, { color: colors.text }]}>Add Group Expense</Text>
+                  <Text style={[styles.modalTitle, { color: colors.text }]}>
+                    {editingExpense ? 'Edit Group Expense' : 'Add Group Expense'}
+                  </Text>
                   <KeyboardAwareScrollView
                     style={styles.modalScrollView}
                     showsVerticalScrollIndicator={false}
@@ -1001,6 +1393,41 @@ export default function SplitScreen() {
                         onChangeText={setExpAmount}
                         keyboardType="numeric"
                       />
+                    </View>
+
+                    <View style={styles.fieldBlock}>
+                      <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>Notes (optional)</Text>
+                      <TextInput
+                        style={[styles.input, { color: colors.text, borderColor: colors.border, minHeight: 56 }]}
+                        placeholder="Add a note…"
+                        placeholderTextColor={colors.textMuted}
+                        value={expNotes}
+                        onChangeText={setExpNotes}
+                        multiline
+                        numberOfLines={2}
+                      />
+                    </View>
+
+                    <View style={styles.fieldBlock}>
+                      <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>Date</Text>
+                      <Pressable
+                        style={[styles.customDateBtn, { borderColor: colors.border, backgroundColor: colors.surfaceVariant }]}
+                        onPress={() => setShowExpDatePicker(true)}
+                      >
+                        <Text style={{ color: colors.textMuted, fontSize: 11, fontWeight: '600' }}>Expense date</Text>
+                        <Text style={{ color: colors.text, fontSize: 14, fontWeight: '700', marginTop: 2 }}>
+                          {formatDate(expDate)}
+                        </Text>
+                      </Pressable>
+                      {showExpDatePicker ? (
+                        <DateTimePicker
+                          value={new Date(expDate)}
+                          mode="date"
+                          display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                          onValueChange={handleExpDateChange}
+                          onDismiss={() => setShowExpDatePicker(false)}
+                        />
+                      ) : null}
                     </View>
 
                     <View style={styles.fieldBlock}>
@@ -1217,7 +1644,7 @@ export default function SplitScreen() {
                         onPress={handleAddExpense}
                         disabled={!expTitle.trim() || !expAmount || !paidById || paidForIds.length === 0}
                       >
-                        <Text style={styles.saveBtnText}>Add</Text>
+                        <Text style={styles.saveBtnText}>{editingExpense ? 'Save' : 'Add'}</Text>
                       </Pressable>
                     </View>
                   </KeyboardAwareScrollView>
@@ -1279,6 +1706,67 @@ export default function SplitScreen() {
                       onChangeText={setInvitePhone}
                       keyboardType="phone-pad"
                     />
+
+                    <View style={[styles.revokeSection, { borderColor: colors.border, backgroundColor: colors.surfaceVariant }]}>
+                      <Text style={[styles.fieldLabel, { color: colors.textMuted, marginBottom: 6 }]}>
+                        Revoke existing invite code
+                      </Text>
+                      <Text style={{ color: colors.textMuted, fontSize: 11, marginBottom: 8 }}>
+                        Paste the code you want to revoke so it can no longer be used to join this group.
+                      </Text>
+                      <TextInput
+                        style={[styles.input, { color: colors.text, borderColor: colors.border }]}
+                        placeholder="Invite code to revoke"
+                        placeholderTextColor={colors.textMuted}
+                        value={revokeCode}
+                        onChangeText={setRevokeCode}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                      />
+                      <Pressable
+                        style={[
+                          styles.saveBtn,
+                          {
+                            backgroundColor: revokeCode.trim() ? colors.error : colors.border,
+                            alignSelf: 'flex-end',
+                            marginTop: 8,
+                            minWidth: 80,
+                          },
+                        ]}
+                        disabled={!revokeCode.trim() || revoking}
+                        onPress={() => {
+                          const code = revokeCode.trim();
+                          if (!code) return;
+                          Alert.alert('Revoke invite code?', `This will invalidate code "${code}" immediately.`, [
+                            { text: 'Cancel', style: 'cancel' },
+                            {
+                              text: 'Revoke',
+                              style: 'destructive',
+                              onPress: () => {
+                                void (async () => {
+                                  setRevoking(true);
+                                  const error = await revokeSplitInviteCode(code);
+                                  setRevoking(false);
+                                  if (error) {
+                                    Alert.alert('Could not revoke', error);
+                                  } else {
+                                    setRevokeCode('');
+                                    Alert.alert('Revoked', 'The invite code has been revoked.');
+                                  }
+                                })();
+                              },
+                            },
+                          ]);
+                        }}
+                      >
+                        {revoking ? (
+                          <ActivityIndicator color="#fff" size="small" />
+                        ) : (
+                          <Text style={styles.saveBtnText}>Revoke</Text>
+                        )}
+                      </Pressable>
+                    </View>
+
                     <View style={styles.modalActions}>
                       <Pressable
                         style={styles.cancelBtn}
@@ -1307,6 +1795,103 @@ export default function SplitScreen() {
               </View>
             </KeyboardModalShell>
           ) : null}
+        </Modal>
+
+        <Modal
+          visible={showRename}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowRename(false)}
+        >
+          <Pressable style={styles.periodModalOverlay} onPress={() => setShowRename(false)}>
+            <Pressable
+              style={[styles.periodModalCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+              onPress={(e) => e.stopPropagation()}
+            >
+              <Text style={[styles.periodModalTitle, { color: colors.text }]}>Rename group</Text>
+              <TextInput
+                style={[styles.input, { color: colors.text, borderColor: colors.border, marginTop: 12 }]}
+                value={renameDraft}
+                onChangeText={setRenameDraft}
+                placeholder="Group name"
+                placeholderTextColor={colors.textMuted}
+                autoFocus
+              />
+              <View style={[styles.modalActions, { marginTop: 16 }]}>
+                <Pressable style={styles.cancelBtn} onPress={() => setShowRename(false)}>
+                  <Text style={{ color: colors.primary, fontWeight: '700', fontSize: 15 }}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.saveBtn,
+                    { backgroundColor: renameDraft.trim() ? colors.primary : colors.border },
+                  ]}
+                  onPress={() => void submitRename()}
+                  disabled={!renameDraft.trim()}
+                >
+                  <Text style={styles.saveBtnText}>Save</Text>
+                </Pressable>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+        <Modal
+          visible={showSettleModal}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowSettleModal(false)}
+        >
+          <Pressable style={styles.periodModalOverlay} onPress={() => setShowSettleModal(false)}>
+            <Pressable
+              style={[styles.periodModalCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+              onPress={(e) => e.stopPropagation()}
+            >
+              <View style={styles.periodModalHeader}>
+                <Text style={[styles.periodModalTitle, { color: colors.text }]}>Settle payment</Text>
+                <Pressable onPress={() => setShowSettleModal(false)} hitSlop={8}>
+                  <MaterialIcons name="close" size={22} color={colors.textMuted} />
+                </Pressable>
+              </View>
+              {settleFlow ? (
+                <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 6, marginBottom: 12 }}>
+                  {settleFlow.debtor} → {settleFlow.creditor} · full amount {formatCurrency(settleFlow.amount)}
+                </Text>
+              ) : null}
+              <Text style={[styles.fieldLabel, { color: colors.textMuted, marginBottom: 6 }]}>Amount</Text>
+              <TextInput
+                style={[styles.input, { color: colors.text, borderColor: colors.border }]}
+                placeholder="0.00"
+                placeholderTextColor={colors.textMuted}
+                value={settleAmount}
+                onChangeText={setSettleAmount}
+                keyboardType="numeric"
+                autoFocus
+              />
+              <Text style={[styles.fieldLabel, { color: colors.textMuted, marginTop: 12, marginBottom: 6 }]}>
+                Note (optional)
+              </Text>
+              <TextInput
+                style={[styles.input, { color: colors.text, borderColor: colors.border }]}
+                placeholder="e.g. paid via UPI"
+                placeholderTextColor={colors.textMuted}
+                value={settleNote}
+                onChangeText={setSettleNote}
+              />
+              <View style={[styles.modalActions, { marginTop: 16 }]}>
+                <Pressable style={styles.cancelBtn} onPress={() => setShowSettleModal(false)}>
+                  <Text style={{ color: colors.primary, fontWeight: '700', fontSize: 15 }}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.saveBtn, { backgroundColor: settleAmount.trim() ? colors.primary : colors.border }]}
+                  onPress={() => void handleConfirmSettle()}
+                  disabled={!settleAmount.trim()}
+                >
+                  <Text style={styles.saveBtnText}>Confirm</Text>
+                </Pressable>
+              </View>
+            </Pressable>
+          </Pressable>
         </Modal>
 
         <Modal
@@ -1414,14 +1999,46 @@ export default function SplitScreen() {
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
       <Text style={[styles.pageTitle, { color: colors.text }]}>Split Groups</Text>
+      <TextInput
+        style={[styles.input, { color: colors.text, borderColor: colors.border, marginBottom: 10 }]}
+        placeholder="Search groups…"
+        placeholderTextColor={colors.textMuted}
+        value={groupSearch}
+        onChangeText={setGroupSearch}
+        clearButtonMode="while-editing"
+      />
+      <View style={styles.groupTabRow}>
+        {(['active', 'archived'] as const).map((tab) => {
+          const selected = groupTab === tab;
+          return (
+            <Pressable
+              key={tab}
+              style={[
+                styles.groupTabChip,
+                {
+                  borderColor: selected ? colors.primary : colors.border,
+                  backgroundColor: selected ? colors.primary : colors.surfaceVariant,
+                },
+              ]}
+              onPress={() => setGroupTab(tab)}
+            >
+              <Text style={{ color: selected ? '#fff' : colors.text, fontWeight: '700', fontSize: 13 }}>
+                {tab === 'active' ? 'Active' : 'Archived'}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
       <FlatList
-        data={groups}
+        data={filteredGroups}
         keyExtractor={groupKeyExtractor}
         renderItem={renderGroupItem}
         contentContainerStyle={styles.listContent}
         ListEmptyComponent={
           <Text style={[styles.empty, { color: colors.textMuted }]}>
-            No groups yet. Press + to create one and invite people by name, phone, or email.
+            {groupTab === 'archived'
+              ? 'No archived groups.'
+              : 'No groups yet. Press + to create one and invite people by name, phone, or email.'}
           </Text>
         }
         initialNumToRender={10}
@@ -1453,19 +2070,38 @@ export default function SplitScreen() {
                 },
               ]}
             >
-              <View style={[styles.modalCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-                <Text style={[styles.modalTitle, { color: colors.text }]}>New Split Group</Text>
-                <KeyboardAwareScrollView
-                  style={styles.modalScrollView}
-                  showsVerticalScrollIndicator={false}
-                  keyboardShouldPersistTaps="handled"
-                  keyboardDismissMode="interactive"
-                  contentContainerStyle={styles.modalScroll}
-                  bottomOffset={48}
-                  extraKeyboardSpace={32}
-                  mode="layout"
-                  nestedScrollEnabled
-                >
+                <View style={[styles.modalCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+                  <Text style={[styles.modalTitle, { color: colors.text }]}>New Split Group</Text>
+                  <KeyboardAwareScrollView
+                    style={styles.modalScrollView}
+                    showsVerticalScrollIndicator={false}
+                    keyboardShouldPersistTaps="handled"
+                    keyboardDismissMode="interactive"
+                    contentContainerStyle={styles.modalScroll}
+                    bottomOffset={48}
+                    extraKeyboardSpace={32}
+                    mode="layout"
+                    nestedScrollEnabled
+                  >
+                  <Pressable style={styles.createPhotoRow} onPress={handlePickCreatePhoto}>
+                    <SplitGroupAvatarPickerPreview localUri={createPhotoUri} size={72} />
+                    <View style={{ flex: 1, marginLeft: 14 }}>
+                      <Text style={{ color: colors.text, fontWeight: '700', fontSize: 15 }}>
+                        Group image
+                      </Text>
+                      <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 4 }}>
+                        Optional. Tap to upload, or keep the default group image.
+                      </Text>
+                      {createPhotoUri ? (
+                        <Pressable onPress={() => setCreatePhotoUri(null)} style={{ marginTop: 6 }}>
+                          <Text style={{ color: colors.error, fontWeight: '700', fontSize: 12 }}>
+                            Use default instead
+                          </Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  </Pressable>
+
                   <Text style={{ color: colors.textMuted, fontSize: 12 }}>
                     You ({profile?.displayName ?? 'You'}) are added automatically. Search registered users or add guests.
                   </Text>
@@ -1547,6 +2183,7 @@ export default function SplitScreen() {
                         setShowCreate(false);
                         resetCreateForm();
                       }}
+                      disabled={creatingGroup}
                     >
                       <Text style={{ color: colors.primary, fontWeight: '700', fontSize: 15 }}>Cancel</Text>
                     </Pressable>
@@ -1559,9 +2196,13 @@ export default function SplitScreen() {
                         },
                       ]}
                       onPress={handleCreate}
-                      disabled={!groupName.trim() || selectedMembers.length === 0}
+                      disabled={!groupName.trim() || selectedMembers.length === 0 || creatingGroup}
                     >
-                      <Text style={styles.saveBtnText}>Create</Text>
+                      {creatingGroup ? (
+                        <ActivityIndicator color="#fff" />
+                      ) : (
+                        <Text style={styles.saveBtnText}>Create</Text>
+                      )}
                     </Pressable>
                   </View>
                 </KeyboardAwareScrollView>
@@ -1586,6 +2227,32 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   detailHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  detailAvatarWrap: { marginLeft: 10 },
+  avatarBusy: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarEditBadge: {
+    position: 'absolute',
+    right: -2,
+    bottom: -2,
+    width: 20,
+    height: 20,
+    borderRadius: 999,
+    backgroundColor: '#0F766E',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#fff',
+  },
+  createPhotoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
   headerInviteBtn: {
     borderWidth: 1,
     borderRadius: 999,
@@ -1837,6 +2504,20 @@ const styles = StyleSheet.create({
   },
   guestRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
   guestAddBtn: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: 12 },
+  groupTabRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  groupTabChip: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  revokeSection: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 4,
+  },
   selectedWrap: { gap: 8 },
   selectedChip: {
     flexDirection: 'row',

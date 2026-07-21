@@ -10,13 +10,48 @@ import {
   serverTimestamp,
   setDoc,
   where,
+  writeBatch,
   type Unsubscribe,
 } from 'firebase/firestore';
-import { getFirebaseFirestore } from '@/src/services/firebase';
+import { getFirebaseConfig } from '@/src/config/firebase';
+import { getFirebaseAuth, getFirebaseFirestore } from '@/src/services/firebase';
 import type { GroupExpense, GroupSettlement, SplitGroup, SplitMember } from '@/src/types/models';
 
 const SHARED_GROUPS = 'split_groups';
 const USERS = 'users';
+
+type StorageUploadResponse = { downloadTokens?: string };
+
+function buildDownloadUrl(bucket: string, objectPath: string, downloadToken: string): string {
+  const encoded = encodeURIComponent(objectPath);
+  return `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encoded}?alt=media&token=${downloadToken}`;
+}
+
+function uploadFileViaXhr(
+  uploadUrl: string,
+  fileUri: string,
+  idToken: string
+): Promise<StorageUploadResponse> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(xhr.responseText || `Upload failed (${xhr.status})`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText) as StorageUploadResponse);
+      } catch {
+        reject(new Error('Invalid upload response from Storage.'));
+      }
+    };
+    xhr.onerror = () => reject(new Error('Network error during upload.'));
+    xhr.open('POST', uploadUrl);
+    xhr.setRequestHeader('Authorization', `Firebase ${idToken}`);
+    xhr.setRequestHeader('Content-Type', 'image/jpeg');
+    xhr.send({ uri: fileUri, type: 'image/jpeg', name: 'group.jpg' } as unknown as XMLHttpRequestBodyInit);
+  });
+}
 
 function sharedGroupsCol() {
   return collection(getFirebaseFirestore(), SHARED_GROUPS);
@@ -96,6 +131,9 @@ function mapGroupDoc(id: string, data: Record<string, unknown>, legacyOwnerEmail
     createdAtMillis: Number(data.createdAtMillis ?? Date.now()),
     members,
     memberUids,
+    photoUrl: data.photoUrl != null ? String(data.photoUrl) : null,
+    archivedAtMillis:
+      data.archivedAtMillis != null ? Number(data.archivedAtMillis) : null,
     userEmail: data.userEmail != null ? String(data.userEmail) : legacyOwnerEmail,
   };
 }
@@ -129,6 +167,7 @@ function mapExpenseDoc(id: string, data: Record<string, unknown>): GroupExpense 
     paidByMemberIds,
     splitAmongNames,
     splitAmongMemberIds,
+    notes: data.notes != null ? String(data.notes) : '',
     splitType: String(data.splitType ?? 'EQUAL'),
     splitsJson: String(data.splitsJson ?? '{}'),
     dateMillis: Number(data.dateMillis ?? Date.now()),
@@ -178,6 +217,7 @@ export async function createSharedGroup(input: {
   createdByUid: string;
   createdByEmail: string;
   members: SplitMember[];
+  photoUrl?: string | null;
 }): Promise<string> {
   const memberUids = [
     ...new Set(
@@ -195,9 +235,140 @@ export async function createSharedGroup(input: {
     createdAtMillis: Date.now(),
     members: input.members,
     memberUids,
+    photoUrl: input.photoUrl ?? null,
     updatedAt: serverTimestamp(),
   });
   return ref.id;
+}
+
+export async function updateSharedGroupPhoto(groupId: string, photoUrl: string | null): Promise<void> {
+  await setDoc(
+    sharedGroupDoc(groupId),
+    {
+      photoUrl,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+export async function updateSharedGroupName(groupId: string, name: string): Promise<void> {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error('Group name is required.');
+  await setDoc(
+    sharedGroupDoc(groupId),
+    {
+      name: trimmed,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+export async function setSharedGroupArchived(groupId: string, archived: boolean): Promise<void> {
+  await setDoc(
+    sharedGroupDoc(groupId),
+    {
+      archivedAtMillis: archived ? Date.now() : null,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+export async function updateSharedGroupExpense(
+  groupId: string,
+  expenseId: string,
+  expense: Omit<GroupExpense, 'id'>
+): Promise<void> {
+  await setDoc(
+    doc(sharedExpensesCol(groupId), expenseId),
+    {
+      userEmail: expense.userEmail,
+      groupId,
+      title: expense.title,
+      amount: expense.amount,
+      paidBy: expense.paidBy,
+      paidByMemberId: expense.paidByMemberId ?? null,
+      paidByNames: expense.paidByNames ?? [],
+      paidByMemberIds: expense.paidByMemberIds ?? [],
+      splitAmongNames: expense.splitAmongNames ?? [],
+      splitAmongMemberIds: expense.splitAmongMemberIds ?? [],
+      notes: expense.notes ?? '',
+      splitType: expense.splitType,
+      splitsJson: expense.splitsJson,
+      dateMillis: expense.dateMillis,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+export async function deleteSharedGroupExpense(groupId: string, expenseId: string): Promise<void> {
+  await deleteDoc(doc(sharedExpensesCol(groupId), expenseId));
+}
+
+async function deleteSubcollectionDocs(groupId: string, sub: 'expenses' | 'settlements'): Promise<void> {
+  const col =
+    sub === 'expenses' ? sharedExpensesCol(groupId) : sharedSettlementsCol(groupId);
+  const snap = await getDocs(col);
+  if (snap.empty) return;
+  const db = getFirebaseFirestore();
+  let batch = writeBatch(db);
+  let count = 0;
+  for (const d of snap.docs) {
+    batch.delete(d.ref);
+    count += 1;
+    if (count >= 400) {
+      await batch.commit();
+      batch = writeBatch(db);
+      count = 0;
+    }
+  }
+  if (count > 0) await batch.commit();
+}
+
+/** Delete expenses + settlements, then the group document (last member leaving). */
+export async function deleteSharedGroupCompletely(groupId: string): Promise<void> {
+  await deleteSubcollectionDocs(groupId, 'expenses');
+  await deleteSubcollectionDocs(groupId, 'settlements');
+  await deleteDoc(sharedGroupDoc(groupId));
+}
+
+/** Upload a group avatar to Storage and return the download URL.
+ * Stored under the uploader’s user path so it works with existing Storage rules
+ * (`users/{uid}/**`). The public download URL is saved on the group doc for all members.
+ */
+export async function uploadSharedGroupPhoto(groupId: string, localUri: string): Promise<string> {
+  const user = getFirebaseAuth().currentUser;
+  if (!user) throw new Error('Not signed in.');
+
+  const idToken = await user.getIdToken(true);
+  const bucket = getFirebaseConfig().storageBucket;
+  if (!bucket) throw new Error('Firebase Storage bucket is not configured.');
+
+  // Must live under users/{uid}/… to satisfy default Storage rules (avoids 403).
+  const objectPath = `${USERS}/${user.uid}/group_avatars/${groupId}.jpg`;
+  const uploadUrl =
+    `https://firebasestorage.googleapis.com/v0/b/${bucket}/o` +
+    `?uploadType=media&name=${encodeURIComponent(objectPath)}`;
+
+  try {
+    const result = await uploadFileViaXhr(uploadUrl, localUri, idToken);
+    const downloadToken = result.downloadTokens?.split(',')[0];
+    if (!downloadToken) {
+      throw new Error('Upload succeeded but no download URL token was returned.');
+    }
+    return buildDownloadUrl(bucket, objectPath, downloadToken);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/403|permission|denied/i.test(message)) {
+      throw new Error(
+        'Storage permission denied. Publish Storage rules that allow writes under users/{yourUid}/ (see README).'
+      );
+    }
+    throw error instanceof Error ? error : new Error(message);
+  }
 }
 
 export async function fetchSharedGroupExpenses(groupId: string): Promise<GroupExpense[]> {
@@ -229,6 +400,7 @@ export async function addSharedGroupExpense(
     paidByMemberIds: expense.paidByMemberIds ?? [],
     splitAmongNames: expense.splitAmongNames ?? [],
     splitAmongMemberIds: expense.splitAmongMemberIds ?? [],
+    notes: expense.notes ?? '',
     splitType: expense.splitType,
     splitsJson: expense.splitsJson,
     dateMillis: expense.dateMillis,
@@ -309,6 +481,10 @@ export async function addSharedGroupSettlement(
   return ref.id;
 }
 
+export async function deleteSharedGroupSettlement(groupId: string, settlementId: string): Promise<void> {
+  await deleteDoc(doc(sharedSettlementsCol(groupId), settlementId));
+}
+
 export function subscribeSharedGroupSettlements(
   groupId: string,
   onData: (settlements: GroupSettlement[]) => void,
@@ -359,7 +535,7 @@ export async function leaveSharedGroup(input: {
   const remainingUids = members.map((m) => m.uid).filter((u): u is string => Boolean(u));
 
   if (remainingUids.length === 0) {
-    await deleteDoc(sharedGroupDoc(input.groupId));
+    await deleteSharedGroupCompletely(input.groupId);
     return;
   }
 

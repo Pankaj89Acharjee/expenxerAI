@@ -5,9 +5,9 @@ import {
   getDocs,
   limit,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
-  updateDoc,
   where,
 } from 'firebase/firestore';
 import { getFirebaseFirestore } from '@/src/services/firebase';
@@ -21,6 +21,7 @@ import type { SplitInvite, SplitMember, UserProfile } from '@/src/types/models';
 import { normalizePhoneDigits, normalizeSearchToken } from '@/src/utils/userSearchKeys';
 
 const INVITES = 'split_invites';
+const SHARED_GROUPS = 'split_groups';
 
 function invitesCol() {
   return collection(getFirebaseFirestore(), INVITES);
@@ -28,6 +29,10 @@ function invitesCol() {
 
 function inviteDoc(code: string) {
   return doc(getFirebaseFirestore(), INVITES, code);
+}
+
+function sharedGroupRef(groupId: string) {
+  return doc(getFirebaseFirestore(), SHARED_GROUPS, groupId);
 }
 
 function generateInviteCode(): string {
@@ -56,6 +61,8 @@ export function buildInviteClaimKeys(input: {
 }
 
 function mapInvite(code: string, data: Record<string, unknown>): SplitInvite {
+  const createdAtMillis = Number(data.createdAtMillis ?? Date.now());
+  const defaultExpiry = createdAtMillis + 14 * 24 * 60 * 60 * 1000;
   return {
     code,
     groupId: String(data.groupId ?? ''),
@@ -66,11 +73,17 @@ function mapInvite(code: string, data: Record<string, unknown>): SplitInvite {
     invitedEmail: data.invitedEmail != null ? String(data.invitedEmail) : null,
     claimKeys: Array.isArray(data.claimKeys) ? data.claimKeys.map(String) : [],
     createdByUid: String(data.createdByUid ?? ''),
-    createdAtMillis: Number(data.createdAtMillis ?? Date.now()),
+    createdAtMillis,
+    expiresAtMillis: Number(data.expiresAtMillis ?? defaultExpiry),
     status: (data.status as SplitInvite['status']) ?? 'pending',
     claimedByUid: data.claimedByUid != null ? String(data.claimedByUid) : null,
     claimedAtMillis: data.claimedAtMillis != null ? Number(data.claimedAtMillis) : null,
   };
+}
+
+export function isInviteExpired(invite: Pick<SplitInvite, 'expiresAtMillis' | 'status'>, now = Date.now()): boolean {
+  if (invite.status !== 'pending') return false;
+  return invite.expiresAtMillis > 0 && now > invite.expiresAtMillis;
 }
 
 export async function fetchInviteByCode(code: string): Promise<SplitInvite | null> {
@@ -95,6 +108,7 @@ export async function createSplitInvite(input: {
     phoneNumber: input.invitedPhone,
     email: input.invitedEmail,
   });
+  const createdAtMillis = Date.now();
   const payload = {
     groupId: input.groupId,
     groupName: input.groupName,
@@ -104,7 +118,8 @@ export async function createSplitInvite(input: {
     invitedEmail: input.invitedEmail ?? null,
     claimKeys,
     createdByUid: input.createdByUid,
-    createdAtMillis: Date.now(),
+    createdAtMillis,
+    expiresAtMillis: createdAtMillis + 14 * 24 * 60 * 60 * 1000,
     status: 'pending' as const,
     claimedByUid: null,
     claimedAtMillis: null,
@@ -112,6 +127,18 @@ export async function createSplitInvite(input: {
   };
   await setDoc(inviteDoc(code), payload);
   return mapInvite(code, payload);
+}
+
+export async function revokeSplitInvite(code: string, actorUid: string): Promise<void> {
+  const invite = await fetchInviteByCode(code);
+  if (!invite) throw new Error('Invite not found.');
+  if (invite.createdByUid !== actorUid) throw new Error('Only the inviter can revoke this invite.');
+  if (invite.status !== 'pending') throw new Error('Invite is no longer pending.');
+  await setDoc(
+    inviteDoc(invite.code),
+    { status: 'revoked', updatedAt: serverTimestamp() },
+    { merge: true }
+  );
 }
 
 async function findPendingInvitesForProfile(
@@ -135,7 +162,8 @@ async function findPendingInvitesForProfile(
         )
       );
       snap.docs.forEach((d) => {
-        results.set(d.id, mapInvite(d.id, d.data() as Record<string, unknown>));
+        const invite = mapInvite(d.id, d.data() as Record<string, unknown>);
+        if (!isInviteExpired(invite)) results.set(d.id, invite);
       });
     })
   );
@@ -207,24 +235,58 @@ export async function claimSplitInvite(input: {
   uid: string;
   profile: UserProfile;
 }): Promise<{ groupId: string; groupName: string } | null> {
-  const invite = await fetchInviteByCode(input.code);
-  if (!invite || invite.status !== 'pending') return null;
-  if (invite.createdByUid === input.uid) {
-    return { groupId: invite.groupId, groupName: invite.groupName };
+  const code = input.code.trim().toUpperCase();
+  if (!code) return null;
+
+  const db = getFirebaseFirestore();
+  const inviteRef = inviteDoc(code);
+
+  try {
+    return await runTransaction(db, async (tx) => {
+      const inviteSnap = await tx.get(inviteRef);
+      if (!inviteSnap.exists()) return null;
+      const invite = mapInvite(inviteSnap.id, inviteSnap.data() as Record<string, unknown>);
+      if (invite.status !== 'pending') return null;
+      if (isInviteExpired(invite)) return null;
+
+      if (invite.createdByUid === input.uid) {
+        return { groupId: invite.groupId, groupName: invite.groupName };
+      }
+
+      const groupRef = sharedGroupRef(invite.groupId);
+      const groupSnap = await tx.get(groupRef);
+      if (!groupSnap.exists()) return null;
+
+      const groupData = groupSnap.data() as Record<string, unknown>;
+      const rawMembers = Array.isArray(groupData.members) ? groupData.members : [];
+      const existingMembers = rawMembers as SplitMember[];
+      const members = mergeMemberIntoGroup(existingMembers, invite, input.uid, input.profile);
+      const memberUids = [
+        ...new Set(members.map((m) => m.uid).filter((u): u is string => Boolean(u))),
+      ];
+
+      tx.set(
+        groupRef,
+        {
+          members,
+          memberUids,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+      tx.update(inviteRef, {
+        status: 'claimed',
+        claimedByUid: input.uid,
+        claimedAtMillis: Date.now(),
+        updatedAt: serverTimestamp(),
+      });
+
+      return { groupId: invite.groupId, groupName: invite.groupName || String(groupData.name ?? 'Group') };
+    });
+  } catch {
+    // Concurrent claim or stale invite — treat as not claimable.
+    return null;
   }
-
-  const group = await fetchSharedGroupById(invite.groupId);
-  if (!group) return null;
-
-  const members = mergeMemberIntoGroup(group.members, invite, input.uid, input.profile);
-  await updateSharedGroupMembers(invite.groupId, members);
-  await updateDoc(inviteDoc(invite.code), {
-    status: 'claimed',
-    claimedByUid: input.uid,
-    claimedAtMillis: Date.now(),
-    updatedAt: serverTimestamp(),
-  });
-  return { groupId: invite.groupId, groupName: invite.groupName };
 }
 
 export async function claimPendingSplitInvites(input: {

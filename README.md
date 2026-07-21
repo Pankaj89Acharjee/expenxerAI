@@ -145,12 +145,15 @@ service cloud.firestore {
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
+    // Profile photos, receipts, and group avatars (users/{uid}/group_avatars/{groupId}.jpg)
     match /users/{userId}/{allPaths=**} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
   }
 }
 ```
+
+Group images upload to **`users/{uid}/group_avatars/{groupId}.jpg`**. The download URL is saved on the group document so every member can see it. Ensure the `users/{userId}` Storage rule above is published in Firebase Console.
 
 4. Add the same `EXPO_PUBLIC_FIREBASE_*` vars (including `STORAGE_BUCKET`) to **EAS Environment variables** for production APK builds.
 
@@ -337,10 +340,85 @@ Right-click the `app-release.apk` file inside Cursor and select **Reveal in File
 
 
 
-### Future Project Expansions Plan
+## Future Agentic AI Planning
 
-1. A comparison line chart where line A shows usual spending trends and line B shows current month's spending trend.
+Current foundation: Gemini Advisor chat (full financial context, images, voice), AI expense categorization, and dashboard charts (spend / category / split). Forecasts today are mostly arithmetic (saving goals, EMI math), not trained ML. The roadmap below focuses on agents that *act*, proactive insights, Advisor analytics, and real-world money features.
 
-2. AI/ML intergration for detecting spikes in expenditure and alert user on that category and when usually occurs throughout the year.
+### AI agents (do work, not just chat)
 
-3. Use `Gemini Vision` for reading bill and returning structured fields in one step when adding a new expenditure from an uploaded bill.
+- **Expense logger agent** — “Spent ₹450 on Swiggy” → creates the expense with category and date
+- **Budget agent** — proposes monthly category budgets from history and applies them with confirmation
+- **Bill / EMI reminder agent** — watches due dates, nudges before overdue, suggests “pay from surplus”
+- **Split settlement agent** — “Settle with Rahul” → computes net, creates settlement, notifies
+- **Receipt agent** — photo → merchant, amount, date, category → draft expense (`Gemini Vision` structured fields in one step when adding an expense from an uploaded bill)
+- **Goal coach agent** — adjusts saving-goal contributions when income or spend changes
+- **Anomaly agent** — flags unusual spikes vs normal patterns and explains why (category + time-of-year seasonality)
+
+### AI features (insights / UX)
+
+- Proactive weekly digest: “You overspent Food by 28%; cut dining 2× to stay on track”
+- Natural-language search: “Show UPI spends over ₹2k last month”
+- Smart duplicate detection (same merchant / amount / day)
+- Subscription waste finder (“unused” or rising recurring charges)
+- Peer / split fairness tips (“you’re owed ₹X across 3 groups”)
+- Voice-first logging without opening Advisor
+- Multi-turn tool calling so Advisor can *create* budgets/expenses, not only advise
+- Comparison line chart: usual spending (line A) vs current month (line B)
+
+### Advisor charts / analytics
+
+Advisor replies are text/markdown today; charts live on Home/Split. Advisor *can* show analytics charts:
+
+1. **Chart cards in chat** — model returns structured data (e.g. `{ type: "category_pie", month: "…" }`) and the UI renders existing SVG chart components
+2. **“Analyze” mode** — user asks “compare this month vs last” → numbers + an embedded chart
+3. **Deep-link** — Advisor answers and opens the matching dashboard chart
+
+### Future predictions (ML and beyond)
+
+Yes — predictions can use ML. Prefer a layered approach:
+
+| Approach | What it predicts | Effort |
+|----------|------------------|--------|
+| Rules + stats (median, moving avg) | Next-month spend, category burn rate | Low |
+| Time-series (Prophet / simple regression) | Monthly totals, cash runway | Medium |
+| LLM + history (current stack) | Narrative forecast (“at this pace…”) | Already close |
+| Classical ML (e.g. XGBoost) | Category next month, overspend risk | Medium–high |
+| Deep models | Only with large clean user datasets | High |
+
+For personal finance, **stats + LLM explanation** usually beats heavy ML until histories are long and clean. Highest-value ML targets: overspend probability, “will I hit this goal?”, festival/rent seasonality, and subscription churn risk.
+
+### Real-world integrations worth building
+
+**Money hygiene**
+
+- Receipt / invoice OCR into expenses
+- Bank / UPI SMS or statement import (CSV → categorized ledger)
+- Recurring detection + cancel/remind for subscriptions
+- Cash-flow calendar (salary in, EMIs/bills out, free cash left)
+- “Safe to spend today” number
+- Tax-ready export (category packs, FY reports for India)
+
+**Accountability & social**
+
+- Shared household budget (beyond Split)
+- Gentle partner/family visibility with privacy controls
+- Debt payoff planner (snowball / avalanche)
+
+**Trust & safety**
+
+- Confirmation before any agent writes data
+- Audit log of AI actions
+- On-device / local-first options for sensitive receipts where possible
+
+**Engagement (practical, not gimmicky)**
+
+- Weekly AI brief (push) instead of endless chat
+- Goal milestones with concrete next actions
+- Merchant-level insights (“Zomato is 18% of discretionary”)
+
+### Highest-ROI next steps
+
+1. Receipt OCR (`Gemini Vision` → structured expense fields)
+2. Action agents (log expense / set budget / settle split) with user confirmation
+3. Proactive anomaly / spend-spike digests (push + Advisor)
+4. Advisor-embedded charts and usual-vs-current spend comparison

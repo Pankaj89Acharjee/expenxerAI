@@ -35,17 +35,24 @@ import {
   buildActiveMemberFromProfile,
   buildGuestMember,
   createSharedGroup,
+  deleteSharedGroupExpense,
+  deleteSharedGroupSettlement,
   fetchAllSharedExpensesForUser,
   fetchLegacyGroupExpenses,
   fetchSharedGroupExpenses,
   fetchSharedGroupsForUser,
   leaveSharedGroup,
   removeSharedGroupMember,
+  setSharedGroupArchived,
   subscribeSharedGroupExpenses,
   subscribeSharedGroupSettlements,
   subscribeSharedGroupsForUser,
+  updateSharedGroupExpense,
+  updateSharedGroupName,
+  updateSharedGroupPhoto,
+  uploadSharedGroupPhoto,
 } from '@/src/services/splitGroupsCloud';
-import { claimPendingSplitInvites, prepareGuestInvite } from '@/src/services/splitInvitesCloud';
+import { claimPendingSplitInvites, prepareGuestInvite, revokeSplitInvite } from '@/src/services/splitInvitesCloud';
 import { searchRegisteredUsers } from '@/src/services/userDirectoryCloud';
 import { consumePendingInviteCode } from '@/src/utils/inviteLink';
 import { shareSplitInvite } from '@/src/utils/whatsappInvite';
@@ -427,17 +434,40 @@ interface FinancialState {
 
   selectGroup: (groupId: string | null) => Promise<void>;
   searchSplitUsers: (query: string) => Promise<UserDirectoryHit[]>;
-  createGroup: (name: string, members: SplitMember[] | string[]) => Promise<void>;
+  createGroup: (name: string, members: SplitMember[] | string[], photoLocalUri?: string | null) => Promise<void>;
+  updateSplitGroupPhoto: (groupId: string, localUri: string | null) => Promise<string | null>;
+  renameSplitGroup: (groupId: string, name: string) => Promise<string | null>;
   addGroupExpense: (
     groupId: string,
     title: string,
     amount: number,
     paidByNames: string[],
-    splitAmongNames?: string[]
+    splitAmongNames?: string[],
+    notes?: string,
+    dateMillis?: number
   ) => Promise<void>;
-  markSplitSettlementPaid: (groupId: string, flow: { debtor: string; creditor: string; amount: number }) => Promise<string | null>;
+  updateGroupExpense: (
+    groupId: string,
+    expenseId: string,
+    title: string,
+    amount: number,
+    paidByNames: string[],
+    splitAmongNames?: string[],
+    notes?: string,
+    dateMillis?: number
+  ) => Promise<string | null>;
+  deleteGroupExpense: (groupId: string, expenseId: string) => Promise<string | null>;
+  markSplitSettlementPaid: (
+    groupId: string,
+    flow: { debtor: string; creditor: string; amount: number },
+    note?: string | null
+  ) => Promise<string | null>;
+  undoSplitSettlement: (groupId: string, settlementId: string) => Promise<string | null>;
   removeSplitMember: (groupId: string, memberId: string) => Promise<string | null>;
   leaveSplitGroup: (groupId: string) => Promise<string | null>;
+  setSplitGroupArchived: (groupId: string, archived: boolean) => Promise<string | null>;
+  revokeSplitInviteCode: (code: string) => Promise<string | null>;
+  registerPushNotifications: () => Promise<void>;
   inviteToGroupViaWhatsApp: (input: {
     groupId: string;
     displayName: string;
@@ -515,6 +545,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
         if (user?.email && user.uid) {
           const profile = await ensureUserProfile(user.uid, user.email, user.displayName);
           set({ currentUserEmail: user.email, userProfile: profile });
+          void get().registerPushNotifications();
           try {
             const preferCode = await consumePendingInviteCode();
             await claimPendingSplitInvites({
@@ -1240,7 +1271,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     return searchRegisteredUsers(query, { excludeUid: uid, max: 20 });
   },
 
-  createGroup: async (name, members) => {
+  createGroup: async (name, members, photoLocalUri) => {
     const email = get().currentUserEmail;
     const uid = currentUid();
     const profile = get().userProfile;
@@ -1263,12 +1294,23 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     const withoutCreator = normalized.filter((m) => m.uid !== uid);
     const allMembers = [creator, ...withoutCreator];
 
-    await createSharedGroup({
+    const groupId = await createSharedGroup({
       name,
       createdByUid: uid,
       createdByEmail: email,
       members: allMembers,
+      photoUrl: null,
     });
+
+    if (photoLocalUri) {
+      try {
+        const photoUrl = await uploadSharedGroupPhoto(groupId, photoLocalUri);
+        await updateSharedGroupPhoto(groupId, photoUrl);
+      } catch {
+        // Group was created; photo can be set later from group detail.
+      }
+    }
+
     await notifySplitGroupMembers(
       { name, members: allMembers },
       'Split Group Created',
@@ -1278,7 +1320,52 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     await get().refreshUserData();
   },
 
-  addGroupExpense: async (groupId, title, amount, paidByNames, splitAmongNames) => {
+  updateSplitGroupPhoto: async (groupId, localUri) => {
+    const uid = currentUid();
+    if (!uid) return 'Sign in required.';
+    const group = get().groups.find((g) => g.id === groupId);
+    if (!group) return 'Group not found.';
+    const { isGroupAdmin } = await import('@/src/types/models');
+    if (!isGroupAdmin(group, uid)) return 'Only the group Admin can change the group photo.';
+
+    try {
+      if (!localUri) {
+        await updateSharedGroupPhoto(groupId, null);
+        return null;
+      }
+      const photoUrl = await uploadSharedGroupPhoto(groupId, localUri);
+      await updateSharedGroupPhoto(groupId, photoUrl);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Could not update group photo.';
+    }
+  },
+
+  renameSplitGroup: async (groupId, name) => {
+    const uid = currentUid();
+    if (!uid) return 'Sign in required.';
+    const group = get().groups.find((g) => g.id === groupId);
+    if (!group) return 'Group not found.';
+    if (!group.memberUids.includes(uid)) return 'Not a group member.';
+    const { isGroupAdmin } = await import('@/src/types/models');
+    if (!isGroupAdmin(group, uid)) return 'Only the group Admin can rename the group.';
+    const trimmed = name.trim();
+    if (!trimmed) return 'Enter a group name.';
+    try {
+      await updateSharedGroupName(groupId, trimmed);
+      await notifySplitGroupMembers(
+        group,
+        'Split Group Renamed',
+        `"${group.name}" was renamed to "${trimmed}".`,
+        'SPLIT'
+      );
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Could not rename group.';
+    }
+  },
+
+  addGroupExpense: async (groupId, title, amount, paidByNames, splitAmongNames, notes, dateMillis) => {
     const email = get().currentUserEmail;
     const uid = currentUid();
     if (!email || !uid) return;
@@ -1318,9 +1405,10 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       paidByMemberIds: payers.map((p) => p.id).filter((id): id is string => Boolean(id)),
       splitAmongNames: splitDisplayNames,
       splitAmongMemberIds: splitMembers.map((m) => m.id).filter((id): id is string => Boolean(id)),
+      notes: (notes ?? '').trim(),
       splitType: 'EQUAL',
       splitsJson: '{}',
-      dateMillis: Date.now(),
+      dateMillis: dateMillis ?? Date.now(),
     };
 
     if (group?.createdByUid) {
@@ -1350,7 +1438,92 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     });
   },
 
-  markSplitSettlementPaid: async (groupId, flow) => {
+  updateGroupExpense: async (groupId, expenseId, title, amount, paidByNames, splitAmongNames, notes, dateMillis) => {
+    const email = get().currentUserEmail;
+    const uid = currentUid();
+    if (!email || !uid) return 'Sign in required.';
+    const group = get().groups.find((g) => g.id === groupId);
+    if (!group?.createdByUid) return 'Editing is only supported on shared groups.';
+    if (!group.memberUids.includes(uid)) return 'Not a group member.';
+    const existing = get().groupExpenses.find((e) => e.id === expenseId) ??
+      get().allGroupExpenses.find((e) => e.id === expenseId && e.groupId === groupId);
+    if (!existing) return 'Expense not found.';
+
+    const names = paidByNames.map((n) => n.trim()).filter(Boolean);
+    if (names.length === 0) return 'Select who paid.';
+    if (!(amount > 0)) return 'Enter a valid amount.';
+
+    const resolveMembers = (rawNames: string[]) =>
+      rawNames.map((name) => {
+        const member = group.members.find((m) => m.displayName === name || m.id === name);
+        return { name: member?.displayName ?? name, id: member?.id ?? null };
+      });
+
+    const payers = resolveMembers(names);
+    const displayNames = payers.map((p) => p.name);
+    const allMemberNames = group.members.map((m) => m.displayName);
+    const splitRaw =
+      Array.isArray(splitAmongNames) && splitAmongNames.length > 0
+        ? splitAmongNames.map((n) => n.trim()).filter(Boolean)
+        : allMemberNames;
+    const splitMembers = resolveMembers(splitRaw);
+    const splitDisplayNames = splitMembers.map((m) => m.name);
+    if (splitDisplayNames.length === 0) return 'Select who shares the cost.';
+
+    try {
+      await updateSharedGroupExpense(groupId, expenseId, {
+        userEmail: existing.userEmail || email,
+        groupId,
+        title: title.trim(),
+        amount,
+        paidBy: displayNames.join(', '),
+        paidByMemberId: payers.length === 1 ? payers[0].id : null,
+        paidByNames: displayNames,
+        paidByMemberIds: payers.map((p) => p.id).filter((id): id is string => Boolean(id)),
+        splitAmongNames: splitDisplayNames,
+        splitAmongMemberIds: splitMembers.map((m) => m.id).filter((id): id is string => Boolean(id)),
+        notes: (notes ?? existing.notes ?? '').trim(),
+        splitType: 'EQUAL',
+        splitsJson: '{}',
+        dateMillis: dateMillis ?? existing.dateMillis,
+      });
+      const actor = group.members.find((m) => m.uid === uid)?.displayName ?? email;
+      await notifySplitGroupMembers(
+        group,
+        'Split Expense Updated',
+        `${actor} updated "${title.trim()}" in "${group.name}".`,
+        'SPLIT'
+      );
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Could not update expense.';
+    }
+  },
+
+  deleteGroupExpense: async (groupId, expenseId) => {
+    const email = get().currentUserEmail;
+    const uid = currentUid();
+    if (!email || !uid) return 'Sign in required.';
+    const group = get().groups.find((g) => g.id === groupId);
+    if (!group?.createdByUid) return 'Deleting is only supported on shared groups.';
+    if (!group.memberUids.includes(uid)) return 'Not a group member.';
+    const existing = get().groupExpenses.find((e) => e.id === expenseId);
+    try {
+      await deleteSharedGroupExpense(groupId, expenseId);
+      const actor = group.members.find((m) => m.uid === uid)?.displayName ?? email;
+      await notifySplitGroupMembers(
+        group,
+        'Split Expense Deleted',
+        `${actor} deleted "${existing?.title ?? 'an expense'}" from "${group.name}".`,
+        'SPLIT'
+      );
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Could not delete expense.';
+    }
+  },
+
+  markSplitSettlementPaid: async (groupId, flow, note) => {
     const uid = currentUid();
     const email = get().currentUserEmail;
     if (!uid || !email) return 'Sign in required.';
@@ -1379,10 +1552,9 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
         amount: flow.amount,
         dateMillis,
         recordedByUid: uid,
-        note: null,
+        note: note?.trim() || null,
       });
 
-      // Record personal expense for the borrower (person who pays to settle).
       if (isBorrower) {
         const alreadyLogged = get().expenses.some(
           (e) => e.sourceType === 'split_settlement' && e.sourceSettlementId === settlementId
@@ -1394,7 +1566,9 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
             amount: flow.amount,
             category: 'Split',
             dateMillis,
-            notes: `Paid ${flow.creditor} to settle borrowed amount in "${group.name}".`,
+            notes: note?.trim()
+              ? note.trim()
+              : `Paid ${flow.creditor} to settle borrowed amount in "${group.name}".`,
             receiptPath: null,
             sourceType: 'split_settlement',
             sourceGroupId: groupId,
@@ -1414,6 +1588,92 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : 'Could not record settlement.';
+    }
+  },
+
+  undoSplitSettlement: async (groupId, settlementId) => {
+    const uid = currentUid();
+    const email = get().currentUserEmail;
+    if (!uid || !email) return 'Sign in required.';
+    const group = get().groups.find((g) => g.id === groupId);
+    if (!group) return 'Group not found.';
+    if (!group.memberUids.includes(uid)) return 'Not a group member.';
+    const settlement =
+      get().groupSettlements.find((s) => s.id === settlementId) ??
+      get().allGroupSettlements.find((s) => s.id === settlementId && s.groupId === groupId);
+    if (!settlement) return 'Settlement not found.';
+    const { isGroupAdmin } = await import('@/src/types/models');
+    const selfName = group.members.find((m) => m.uid === uid)?.displayName ?? '';
+    const canUndo =
+      isGroupAdmin(group, uid) ||
+      settlement.recordedByUid === uid ||
+      settlement.debtor === selfName ||
+      settlement.creditor === selfName;
+    if (!canUndo) return 'You cannot undo this settlement.';
+
+    try {
+      await deleteSharedGroupSettlement(groupId, settlementId);
+      const linked = get().expenses.find(
+        (e) => e.sourceType === 'split_settlement' && e.sourceSettlementId === settlementId
+      );
+      if (linked) {
+        await deleteCloudExpense(uid, linked.id);
+        await get().refreshUserData();
+      }
+      await notifySplitGroupMembers(
+        group,
+        'Split Settlement Undone',
+        `A settlement of ₹${settlement.amount.toFixed(2)} (${settlement.debtor} → ${settlement.creditor}) was undone in "${group.name}".`,
+        'SPLIT'
+      );
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Could not undo settlement.';
+    }
+  },
+
+  setSplitGroupArchived: async (groupId, archived) => {
+    const uid = currentUid();
+    if (!uid) return 'Sign in required.';
+    const group = get().groups.find((g) => g.id === groupId);
+    if (!group) return 'Group not found.';
+    if (!group.memberUids.includes(uid)) return 'Not a group member.';
+    const { isGroupAdmin } = await import('@/src/types/models');
+    if (!isGroupAdmin(group, uid)) return 'Only the group Admin can archive the group.';
+    try {
+      await setSharedGroupArchived(groupId, archived);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Could not update archive status.';
+    }
+  },
+
+  revokeSplitInviteCode: async (code) => {
+    const uid = currentUid();
+    if (!uid) return 'Sign in required.';
+    try {
+      await revokeSplitInvite(code, uid);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Could not revoke invite.';
+    }
+  },
+
+  registerPushNotifications: async () => {
+    const uid = currentUid();
+    const profile = get().userProfile;
+    if (!uid || !profile) return;
+    try {
+      const { registerForPushNotificationsAsync, saveExpoPushToken } = await import(
+        '@/src/services/pushNotifications'
+      );
+      const token = await registerForPushNotificationsAsync();
+      if (!token) return;
+      await saveExpoPushToken(uid, token);
+      const updated = { ...profile, expoPushToken: token };
+      set({ userProfile: updated });
+    } catch {
+      // Ignore — push requires a physical device / permissions.
     }
   },
 

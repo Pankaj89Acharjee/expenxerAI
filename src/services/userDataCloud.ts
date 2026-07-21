@@ -341,6 +341,7 @@ export async function fetchGroups(uid: string): Promise<SplitGroup[]> {
         createdAtMillis: Number(data.createdAtMillis ?? 0),
         members,
         memberUids: members.map((m) => m.uid).filter((u): u is string => Boolean(u)),
+        photoUrl: data.photoUrl != null ? String(data.photoUrl) : null,
         userEmail: data.userEmail != null ? String(data.userEmail) : undefined,
       } satisfies SplitGroup;
     })
@@ -385,6 +386,7 @@ export async function fetchGroupExpenses(uid: string, groupId: string): Promise<
         splitAmongMemberIds: Array.isArray(data.splitAmongMemberIds)
           ? data.splitAmongMemberIds.map(String)
           : undefined,
+        notes: data.notes != null ? String(data.notes) : '',
         splitType: String(data.splitType ?? 'EQUAL'),
         splitsJson: String(data.splitsJson ?? '{}'),
         dateMillis: Number(data.dateMillis ?? Date.now()),
@@ -405,6 +407,7 @@ export async function addGroupExpense(uid: string, expense: Omit<GroupExpense, '
     paidByMemberIds: expense.paidByMemberIds ?? [],
     splitAmongNames: expense.splitAmongNames ?? [],
     splitAmongMemberIds: expense.splitAmongMemberIds ?? [],
+    notes: expense.notes ?? '',
     splitType: expense.splitType,
     splitsJson: expense.splitsJson,
     dateMillis: expense.dateMillis,
@@ -443,6 +446,14 @@ export async function addCloudLog(
     timestamp: Date.now(),
     type,
   });
+  try {
+    const { sendPushToUser, tabFromNotificationType } = await import(
+      '@/src/services/pushNotifications'
+    );
+    await sendPushToUser(uid, title, message, { tab: tabFromNotificationType(type) });
+  } catch {
+    // Push is best-effort.
+  }
 }
 
 /** Live updates for the signed-in user's notification center. */

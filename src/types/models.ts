@@ -137,6 +137,8 @@ export interface SplitInvite {
   claimKeys: string[];
   createdByUid: string;
   createdAtMillis: number;
+  /** Invite expires after this time; claim rejected when past. */
+  expiresAtMillis: number;
   status: 'pending' | 'claimed' | 'revoked';
   claimedByUid: string | null;
   claimedAtMillis: number | null;
@@ -151,6 +153,10 @@ export interface SplitGroup {
   members: SplitMember[];
   /** Registered member UIDs only — used for Firestore membership queries. */
   memberUids: string[];
+  /** Custom group photo URL; null/empty uses the default group image. */
+  photoUrl?: string | null;
+  /** Soft-archive; hidden from main list when set. */
+  archivedAtMillis?: number | null;
   /** @deprecated Legacy single-owner field kept for old local groups. */
   userEmail?: string;
 }
@@ -173,6 +179,7 @@ export interface GroupExpense {
   /** Members who share the cost ("paid for"). Legacy expenses omit this → whole group. */
   splitAmongNames?: string[];
   splitAmongMemberIds?: string[];
+  notes?: string;
   splitType: string;
   splitsJson: string;
   dateMillis: number;
@@ -239,6 +246,8 @@ export interface UserProfile {
   state?: string | null;
   areaOfInterest?: string | null;
   splitwiseHandle?: string | null;
+  /** Expo push token for device notifications. */
+  expoPushToken?: string | null;
 }
 
 export function defaultProfileExtras(): Pick<

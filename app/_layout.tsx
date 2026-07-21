@@ -2,7 +2,7 @@ import { useFonts } from 'expo-font';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import * as SystemUI from 'expo-system-ui';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { ActivityIndicator, Platform, StatusBar, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
@@ -10,6 +10,10 @@ import 'react-native-reanimated';
 import { useFinancialStore } from '@/src/store/useFinancialStore';
 import { useColorScheme } from '@/components/useColorScheme';
 import { themeColors } from '@/src/theme/colors';
+import {
+  addNotificationResponseListener,
+  type PushTabTarget,
+} from '@/src/services/pushNotifications';
 
 export { ErrorBoundary } from 'expo-router';
 
@@ -18,6 +22,23 @@ SplashScreen.preventAutoHideAsync(); // Prevent the splash screen from automatic
 // Login screen always uses this dark background
 const LOGIN_BG = '#000000';
 
+function routeForPushTab(tab: PushTabTarget | undefined): string {
+  switch (tab) {
+    case 'split':
+      return '/(tabs)/split';
+    case 'expenses':
+      return '/(tabs)/expenses';
+    case 'planner':
+      return '/(tabs)/planner';
+    case 'advisor':
+      return '/(tabs)/advisor';
+    case 'profile':
+      return '/(tabs)/profile';
+    default:
+      return '/(tabs)';
+  }
+}
+
 export default function RootLayout() {
   const [loaded, error] = useFonts({
     SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
@@ -25,11 +46,13 @@ export default function RootLayout() {
   const init = useFinancialStore((s) => s.init);
   const initialized = useFinancialStore((s) => s.initialized);
   const currentUserEmail = useFinancialStore((s) => s.currentUserEmail);
+  const registerPushNotifications = useFinancialStore((s) => s.registerPushNotifications);
   const segments = useSegments();
   const router = useRouter();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
   const colors = themeColors(isDark);
+  const notificationResponseSub = useRef<{ remove: () => void } | null>(null);
 
   const isOnLogin = segments[0] === 'login';
 
@@ -63,6 +86,29 @@ export default function RootLayout() {
       router.replace('/(tabs)');
     }
   }, [currentUserEmail, initialized, segments, router]);
+
+  useEffect(() => {
+    if (!currentUserEmail) return;
+    void registerPushNotifications();
+  }, [currentUserEmail, registerPushNotifications]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void addNotificationResponseListener((tab) => {
+      router.push(routeForPushTab(tab) as never);
+    }).then((sub) => {
+      if (cancelled) {
+        sub?.remove();
+        return;
+      }
+      notificationResponseSub.current = sub;
+    });
+    return () => {
+      cancelled = true;
+      notificationResponseSub.current?.remove();
+      notificationResponseSub.current = null;
+    };
+  }, [router]);
 
   return (
     <SafeAreaProvider>
