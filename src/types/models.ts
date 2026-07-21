@@ -10,6 +10,10 @@ export interface Expense {
   isSettled?: boolean;
   settlementNote?: string | null;
   settlementDateMillis?: number | null;
+  /** Set when created from a Split settlement payment. */
+  sourceType?: 'split_settlement' | null;
+  sourceGroupId?: string | null;
+  sourceSettlementId?: string | null;
 }
 
 export type LiabilityKind = 'ANNUAL' | 'LOAN' | 'CREDIT_CARD_LOAN';
@@ -112,11 +116,43 @@ export interface SavingGoal {
   creationDateMillis: number;
 }
 
+export interface SplitMember {
+  id: string;
+  uid: string | null;
+  displayName: string;
+  email: string | null;
+  phoneNumber: string | null;
+  status: 'active' | 'guest' | 'invited';
+}
+
+export interface SplitInvite {
+  code: string;
+  groupId: string;
+  groupName: string;
+  guestMemberId: string | null;
+  invitedDisplayName: string | null;
+  invitedPhone: string | null;
+  invitedEmail: string | null;
+  /** Normalized phone/email tokens used to auto-claim after signup. */
+  claimKeys: string[];
+  createdByUid: string;
+  createdAtMillis: number;
+  status: 'pending' | 'claimed' | 'revoked';
+  claimedByUid: string | null;
+  claimedAtMillis: number | null;
+}
+
 export interface SplitGroup {
   id: string;
-  userEmail: string;
   name: string;
-  members: string[];
+  createdByUid: string;
+  createdByEmail: string;
+  createdAtMillis: number;
+  members: SplitMember[];
+  /** Registered member UIDs only — used for Firestore membership queries. */
+  memberUids: string[];
+  /** @deprecated Legacy single-owner field kept for old local groups. */
+  userEmail?: string;
 }
 
 export interface GroupExpense {
@@ -125,10 +161,46 @@ export interface GroupExpense {
   groupId: string;
   title: string;
   amount: number;
+  /**
+   * Display label for who paid.
+   * Single payer: that name. Multiple: comma-separated (kept for older UI/logs).
+   */
   paidBy: string;
+  paidByMemberId?: string | null;
+  /** One or more payer display names (equal contribution among payers). */
+  paidByNames?: string[];
+  paidByMemberIds?: string[];
+  /** Members who share the cost ("paid for"). Legacy expenses omit this → whole group. */
+  splitAmongNames?: string[];
+  splitAmongMemberIds?: string[];
   splitType: string;
   splitsJson: string;
   dateMillis: number;
+}
+
+/** Resolve payer names from new multi-payer fields or legacy `paidBy`. */
+export function getGroupExpensePayers(expense: Pick<GroupExpense, 'paidBy' | 'paidByNames'>): string[] {
+  if (Array.isArray(expense.paidByNames) && expense.paidByNames.length > 0) {
+    return expense.paidByNames.map((n) => n.trim()).filter(Boolean);
+  }
+  const legacy = String(expense.paidBy ?? '')
+    .split(',')
+    .map((n) => n.trim())
+    .filter(Boolean);
+  return legacy;
+}
+
+/**
+ * Who shares the cost. Falls back to `allMemberNames` when unset (legacy equal-split-all).
+ */
+export function getGroupExpenseSplitAmong(
+  expense: Pick<GroupExpense, 'splitAmongNames'>,
+  allMemberNames: string[]
+): string[] {
+  if (Array.isArray(expense.splitAmongNames) && expense.splitAmongNames.length > 0) {
+    return expense.splitAmongNames.map((n) => n.trim()).filter(Boolean);
+  }
+  return allMemberNames;
 }
 
 export interface NotificationLog {
@@ -140,10 +212,21 @@ export interface NotificationLog {
   type: string;
 }
 
+export interface UserDirectoryHit {
+  uid: string;
+  displayName: string;
+  email: string;
+  phoneNumber: string | null;
+  photoUrl: string | null;
+}
+
 export interface UserProfile {
   email: string;
   displayName: string;
   photoUrl?: string | null;
+  phoneNumber?: string | null;
+  /** Normalized tokens for directory search (name parts, email, phone). */
+  searchKeys?: string[];
   monthlyIncome: number;
   baseSavingsRatePercent: number;
   alertPreference: boolean;
@@ -169,6 +252,7 @@ export function defaultProfileExtras(): Pick<
   | 'state'
   | 'areaOfInterest'
   | 'splitwiseHandle'
+  | 'phoneNumber'
 > {
   return {
     designation: null,
@@ -180,7 +264,67 @@ export function defaultProfileExtras(): Pick<
     state: null,
     areaOfInterest: null,
     splitwiseHandle: null,
+    phoneNumber: null,
   };
+}
+
+export function splitMemberDisplayNames(group: Pick<SplitGroup, 'members'>): string[] {
+  return group.members.map((m) => m.displayName);
+}
+
+/** Resolve the group Admin (creator) for display — matches uid, member id, or email. */
+export function resolveGroupAdmin(
+  group: Pick<SplitGroup, 'members' | 'createdByUid' | 'createdByEmail'>
+): { displayName: string; uid: string | null; email: string | null } | null {
+  const createdByUid = (group.createdByUid ?? '').trim();
+  const createdByEmail = (group.createdByEmail ?? '').trim().toLowerCase();
+
+  if (createdByUid) {
+    const byUid = group.members.find(
+      (m) => m.uid === createdByUid || m.id === createdByUid
+    );
+    if (byUid) {
+      return {
+        displayName: byUid.displayName,
+        uid: byUid.uid,
+        email: byUid.email,
+      };
+    }
+  }
+
+  if (createdByEmail) {
+    const byEmail = group.members.find(
+      (m) => (m.email ?? '').trim().toLowerCase() === createdByEmail
+    );
+    if (byEmail) {
+      return {
+        displayName: byEmail.displayName,
+        uid: byEmail.uid,
+        email: byEmail.email,
+      };
+    }
+    return {
+      displayName: createdByEmail.split('@')[0] || createdByEmail,
+      uid: createdByUid || null,
+      email: group.createdByEmail ?? null,
+    };
+  }
+
+  if (createdByUid) {
+    return { displayName: 'Admin', uid: createdByUid, email: null };
+  }
+
+  return null;
+}
+
+export function isGroupAdmin(
+  group: Pick<SplitGroup, 'createdByUid' | 'createdByEmail' | 'members'>,
+  uid: string | null | undefined
+): boolean {
+  if (!uid) return false;
+  if (group.createdByUid && group.createdByUid === uid) return true;
+  const admin = resolveGroupAdmin(group);
+  return Boolean(admin?.uid && admin.uid === uid);
 }
 
 export interface BudgetTemplate {
@@ -204,6 +348,18 @@ export interface DebtFlow {
   debtor: string;
   creditor: string;
   amount: number;
+}
+
+/** Recorded peer payment that offsets split balances (mark settled). */
+export interface GroupSettlement {
+  id: string;
+  groupId: string;
+  debtor: string;
+  creditor: string;
+  amount: number;
+  dateMillis: number;
+  recordedByUid: string;
+  note?: string | null;
 }
 
 export interface ChatAttachment {

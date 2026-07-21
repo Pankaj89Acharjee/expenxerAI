@@ -19,6 +19,7 @@ import { LiabilityMonthDetailModal } from '@/src/components/dashboard/LiabilityM
 import { AnnualSpendLineChart } from '@/src/components/dashboard/AnnualSpendLineChart';
 import { CategoryMixCard } from '@/src/components/dashboard/CategoryMixCard';
 import { SpendSaveRadialPie } from '@/src/components/dashboard/MiniRadialPie';
+import { SplitOverviewCard } from '@/src/components/dashboard/SplitOverviewCard';
 import { LiabilityManageModal } from '@/src/components/planner/LiabilityManageModal';
 import { useColorScheme } from '@/components/useColorScheme';
 import { useFinancialStore } from '@/src/store/useFinancialStore';
@@ -107,6 +108,8 @@ export default function DashboardScreen() {
 
   const profile = useFinancialStore((s) => s.userProfile);
   const expenses = useFinancialStore((s) => s.expenses);
+  const groups = useFinancialStore((s) => s.groups);
+  const allGroupExpenses = useFinancialStore((s) => s.allGroupExpenses);
   const liabilities = useFinancialStore((s) => s.liabilities);
   const subscriptions = useFinancialStore((s) => s.subscriptions);
   const bills = useFinancialStore((s) => s.bills);
@@ -1035,6 +1038,8 @@ export default function DashboardScreen() {
       </LinearGradient>
 
       <CategoryMixCard categories={categoryTotals} total={categoryTotalSum} />
+
+      <SplitOverviewCard expenses={allGroupExpenses} groupCount={groups.length} />
 
       {/* Quick Nav for viewing Expense and Monthly Bill */}
       <View style={styles.actionRow}>

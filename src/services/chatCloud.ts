@@ -204,13 +204,28 @@ export async function fetchAllGroupExpenses(uid: string): Promise<GroupExpense[]
   return snap.docs
     .map((d) => {
       const data = d.data();
+      const paidByNames = Array.isArray(data.paidByNames)
+        ? data.paidByNames.map(String).filter(Boolean)
+        : undefined;
+      const splitAmongNames = Array.isArray(data.splitAmongNames)
+        ? data.splitAmongNames.map(String).filter(Boolean)
+        : undefined;
       return {
         id: d.id,
         userEmail: String(data.userEmail ?? ''),
         groupId: String(data.groupId ?? ''),
         title: String(data.title ?? ''),
         amount: Number(data.amount ?? 0),
-        paidBy: String(data.paidBy ?? ''),
+        paidBy: paidByNames?.length ? paidByNames.join(', ') : String(data.paidBy ?? ''),
+        paidByMemberId: data.paidByMemberId != null ? String(data.paidByMemberId) : null,
+        paidByNames,
+        paidByMemberIds: Array.isArray(data.paidByMemberIds)
+          ? data.paidByMemberIds.map(String)
+          : undefined,
+        splitAmongNames,
+        splitAmongMemberIds: Array.isArray(data.splitAmongMemberIds)
+          ? data.splitAmongMemberIds.map(String)
+          : undefined,
         splitType: String(data.splitType ?? 'EQUAL'),
         splitsJson: String(data.splitsJson ?? '{}'),
         dateMillis: Number(data.dateMillis ?? Date.now()),

@@ -58,6 +58,16 @@ export const EXPENSE_TIME_PERIODS = [
 
 export type ExpenseTimePeriodKey = (typeof EXPENSE_TIME_PERIODS)[number]['key'];
 
+/** Period chips used on Split group detail (month / year / custom / all). */
+export const SPLIT_TIME_PERIODS = [
+  { key: 'month', label: 'This month', shortLabel: 'Month' },
+  { key: 'year', label: 'This year', shortLabel: 'Year' },
+  { key: 'custom', label: 'Custom', shortLabel: 'Custom' },
+  { key: 'all', label: 'All time', shortLabel: 'All' },
+] as const;
+
+export type SplitTimePeriodKey = (typeof SPLIT_TIME_PERIODS)[number]['key'];
+
 export type ExpenseDateRange = {
   start: number;
   end: number;
@@ -194,6 +204,39 @@ export function getExpenseRangeForPeriod(
     end: now,
     label: preset.label,
   };
+}
+
+export function getCurrentYearExpenseRange(now = Date.now()): ExpenseDateRange {
+  const today = new Date(now);
+  const start = new Date(today.getFullYear(), 0, 1).getTime();
+  const end = endOfDay(now);
+  return {
+    start,
+    end,
+    label: String(today.getFullYear()),
+  };
+}
+
+export function getSplitRangeForPeriod(
+  period: SplitTimePeriodKey,
+  customStart: number,
+  customEnd: number,
+  now = Date.now()
+): ExpenseDateRange {
+  if (period === 'all') {
+    return { start: 0, end: Number.MAX_SAFE_INTEGER, label: 'All time' };
+  }
+  if (period === 'year') {
+    return getCurrentYearExpenseRange(now);
+  }
+  if (period === 'month') {
+    return getCurrentMonthExpenseRange(now);
+  }
+  return getExpenseRangeForPeriod('custom', customStart, customEnd, now);
+}
+
+export function getSplitPeriodMeta(period: SplitTimePeriodKey) {
+  return SPLIT_TIME_PERIODS.find((p) => p.key === period) ?? SPLIT_TIME_PERIODS[0];
 }
 
 export function getPeriodMeta(period: ExpenseTimePeriodKey) {

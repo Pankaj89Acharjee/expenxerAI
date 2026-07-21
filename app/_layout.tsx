@@ -83,6 +83,10 @@ export default function RootLayout() {
               name="login"
               options={{ contentStyle: { backgroundColor: LOGIN_BG } }}
             />
+            <Stack.Screen
+              name="invite/[code]"
+              options={{ contentStyle: { backgroundColor: LOGIN_BG } }}
+            />
             {/* Tabs follow the system dark/light theme */}
             <Stack.Screen
               name="(tabs)"

@@ -332,6 +332,17 @@ export default function ProfileScreen() {
           <ProfileField label="Email" hint="Valid email address" icon="email" colors={colors}>
             <TextInput style={[inputStyle, styles.readOnly]} value={form.email} editable={false} />
           </ProfileField>
+
+          <ProfileField label="Phone" hint="Used so others can find you in Split" icon="phone" colors={colors}>
+            <TextInput
+              style={inputStyle}
+              value={form.phoneNumber ?? ''}
+              onChangeText={(t) => patch({ phoneNumber: t || null })}
+              placeholder="e.g. 9876543210"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="phone-pad"
+            />
+          </ProfileField>
         </View>
 
         {/* Financial */}

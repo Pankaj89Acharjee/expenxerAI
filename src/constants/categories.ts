@@ -10,6 +10,7 @@ export const EXPENSE_CATEGORIES = [
   'Savings',
   'Personal',
   'Borrowing', // informal peer lending only — use Planner → Loans for EMIs
+  'Split', // peer settlement payment from Split groups
   'Loan-Liability', // expense tag for paid EMIs — register loans in Planner
   'Credit-card', // one-off card spend — register card loans in Planner
   'Insurance',

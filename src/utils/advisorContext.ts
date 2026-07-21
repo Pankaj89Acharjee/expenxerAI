@@ -4,11 +4,17 @@ import type {
   CategoryBudget,
   Expense,
   GroupExpense,
+  GroupSettlement,
   Liability,
   SavingGoal,
   SplitGroup,
   Subscription,
   UserProfile,
+} from '@/src/types/models';
+import {
+  splitMemberDisplayNames,
+  getGroupExpensePayers,
+  getGroupExpenseSplitAmong,
 } from '@/src/types/models';
 import {
   getCurrentMonthEmiStatus,
@@ -36,6 +42,8 @@ export interface AdvisorContextInput {
   budgetTemplates: BudgetTemplate[];
   groups: SplitGroup[];
   groupExpenses: GroupExpense[];
+  /** Recorded mark-as-paid transfers (optional; defaults to none). */
+  groupSettlements?: GroupSettlement[];
 }
 
 function monthKey(ms: number): string {
@@ -170,6 +178,7 @@ export function buildAdvisorSystemPrompt(input: AdvisorContextInput): string {
     budgetTemplates,
     groups,
     groupExpenses,
+    groupSettlements = [],
   } = input;
 
   const userIncome = userProfile?.monthlyIncome ?? 5000;
@@ -261,16 +270,26 @@ export function buildAdvisorSystemPrompt(input: AdvisorContextInput): string {
         .map((g) => {
           const gExpenses = groupExpenses.filter((e) => e.groupId === g.id);
           const total = gExpenses.reduce((s, e) => s + e.amount, 0);
-          const settlements = calculateSettlements(g.members, gExpenses);
+          const memberNames = splitMemberDisplayNames(g);
+          const recorded = groupSettlements.filter((s) => s.groupId === g.id);
+          const settlements = calculateSettlements(memberNames, gExpenses, recorded);
           const settleStr =
             settlements.length > 0
-              ? settlements.map((f) => `${f.debtor} owes ${f.creditor} ₹${f.amount.toFixed(2)}`).join('; ')
+              ? settlements.map((f) => `${f.debtor} borrowed from ${f.creditor} ₹${f.amount.toFixed(2)}`).join('; ')
               : 'balanced';
           const recent = gExpenses
             .slice(0, 5)
-            .map((e) => `${e.title} ₹${e.amount.toFixed(2)} paid by ${e.paidBy} (${formatDate(e.dateMillis)})`)
+            .map((e) => {
+              const payers = getGroupExpensePayers(e).join(', ') || e.paidBy;
+              const among = getGroupExpenseSplitAmong(e, memberNames);
+              const forLabel =
+                among.length === 0 || among.length === memberNames.length
+                  ? 'everyone'
+                  : among.join(', ');
+              return `${e.title} ₹${e.amount.toFixed(2)} paid by ${payers} for ${forLabel} (${formatDate(e.dateMillis)})`;
+            })
             .join('; ');
-          return `Group "${g.name}" [${g.members.join(', ')}]: ${gExpenses.length} expenses, total ₹${total.toFixed(2)} | settlements: ${settleStr}${recent ? ` | recent: ${recent}` : ''}`;
+          return `Group "${g.name}" [${memberNames.join(', ')}]: ${gExpenses.length} expenses, total ₹${total.toFixed(2)} | settlements: ${settleStr}${recent ? ` | recent: ${recent}` : ''}`;
         })
         .join('\n')
     : 'None';

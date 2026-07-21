@@ -91,7 +91,7 @@ export function MiniRadialPie({ segments, size = 100, emptyLabel = 'No data' }: 
       <View style={styles.center} pointerEvents="none">
         {hasData ? (
           <>
-            <Text style={[styles.centerPct, size < 90 && { fontSize: 14 }]}>{pct}%</Text>
+            <Text style={[styles.centerPct, size < 90 && { fontSize: 16 }]}>{pct}%</Text>
             <Text style={styles.centerHint} numberOfLines={1}>
               {active?.label ?? ''}
             </Text>
@@ -148,18 +148,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   centerPct: { color: '#FFFFFF', fontSize: 17, fontWeight: '900', letterSpacing: -0.5 },
-  centerHint: { color: 'rgba(255,255,255,0.6)', fontSize: 10, fontWeight: '700', marginTop: 1 },
+  centerHint: { color: 'rgba(255,255,255,0.6)', fontSize: 8, fontWeight: '700', marginTop: 1 },
   tooltip: {
     position: 'absolute',
-    bottom: -38,
-    left: -28,
-    right: -28,
-    minWidth: 120,
+    bottom: -12,
+    left: -24,
+    right: -24,
+    minWidth: 96,
+    maxWidth: 170,
     alignItems: 'center',
-    backgroundColor: 'rgba(15,23,42,0.92)',
+    backgroundColor: 'rgba(2, 36, 30, 0.92)',
     borderRadius: 10,
     paddingVertical: 6,
     paddingHorizontal: 14,
+    paddingLeft: 20,
+    marginLeft: 12,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.18)',
   },

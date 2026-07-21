@@ -38,7 +38,8 @@ import type { Expense } from '@/src/types/models';
 
 const CATEGORY_ICONS: Record<string, string> = {
   Food: '🍔', Transport: '🚗', Utilities: '💡', Shopping: '🛍️', Entertainment: '🎬',
-  Health: '💊', Housing: '🏠', Groceries: '🛒', Borrowing: '🤝', 'Credit-card': '💳', Other: '📦',
+  Health: '💊', Housing: '🏠', Groceries: '🛒', Borrowing: '🤝', Split: '👥',
+  'Credit-card': '💳', Other: '📦',
 };
 
 const SETTLEMENT_CATEGORIES = new Set(['Borrowing']);

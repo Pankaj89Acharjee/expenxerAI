@@ -12,6 +12,9 @@ export function expenseToFirestore(expense: Omit<Expense, 'id'>): Record<string,
     isSettled: expense.isSettled ?? false,
     settlementNote: expense.settlementNote ?? null,
     settlementDateMillis: expense.settlementDateMillis ?? null,
+    sourceType: expense.sourceType ?? null,
+    sourceGroupId: expense.sourceGroupId ?? null,
+    sourceSettlementId: expense.sourceSettlementId ?? null,
   };
 }
 
@@ -28,5 +31,8 @@ export function expenseFromFirestore(id: string, data: Record<string, unknown>):
     isSettled: Boolean(data.isSettled),
     settlementNote: data.settlementNote ? String(data.settlementNote) : null,
     settlementDateMillis: data.settlementDateMillis != null ? Number(data.settlementDateMillis) : null,
+    sourceType: data.sourceType === 'split_settlement' ? 'split_settlement' : null,
+    sourceGroupId: data.sourceGroupId != null ? String(data.sourceGroupId) : null,
+    sourceSettlementId: data.sourceSettlementId != null ? String(data.sourceSettlementId) : null,
   };
 }

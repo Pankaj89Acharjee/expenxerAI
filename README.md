@@ -77,23 +77,60 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-  	match /users/{userId} {
-    	allow read, write: if request.auth != null && request.auth.uid == userId;
-      
+    match /users/{userId} {
+      // Own profile: full access
+      allow write: if request.auth != null && request.auth.uid == userId;
+      // Any signed-in user can read profiles for Split directory search
+      // (displayName, email, phoneNumber, searchKeys, photoUrl).
+      allow read: if request.auth != null;
+
       match /{document=**} {
-      	allow read, write: if request.auth != null && request.auth.uid == userId; 
+        allow read, write: if request.auth != null && request.auth.uid == userId;
       }
     }
 
-    // This rule allows anyone with your Firestore database reference to view, edit,
-    // and delete all data in your Firestore database. It is useful for getting
-    // started, but it is configured to expire after 30 days because it
-    // leaves your app open to attackers. At that time, all client
-    // requests to your Firestore database will be denied.
-    //
-    // Make sure to write security rules for your app before that time, or else
-    // all client requests to your Firestore database will be denied until you Update
-    // your rules
+    // Shared split groups — members listed in memberUids
+    match /split_groups/{groupId} {
+      // get: members, or signed-in users claiming an invite (they know groupId)
+      allow get: if request.auth != null;
+      allow list: if request.auth != null
+        && request.auth.uid in resource.data.memberUids;
+      allow create: if request.auth != null
+        && request.auth.uid in request.resource.data.memberUids
+        && request.resource.data.createdByUid == request.auth.uid;
+      // Members can edit; invitees may add themselves if they keep existing memberUids
+      allow update: if request.auth != null && (
+        request.auth.uid in resource.data.memberUids
+        || (
+          request.auth.uid in request.resource.data.memberUids
+          && request.resource.data.memberUids.hasAll(resource.data.memberUids)
+        )
+      );
+      allow delete: if request.auth != null
+        && request.auth.uid in resource.data.memberUids;
+
+      match /expenses/{expenseId} {
+        allow read, write: if request.auth != null
+          && request.auth.uid in get(/databases/$(database)/documents/split_groups/$(groupId)).data.memberUids;
+      }
+
+      match /settlements/{settlementId} {
+        allow read, write: if request.auth != null
+          && request.auth.uid in get(/databases/$(database)/documents/split_groups/$(groupId)).data.memberUids;
+      }
+    }
+
+    // WhatsApp / deep-link invites (claim after signup)
+    match /split_invites/{inviteCode} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.resource.data.createdByUid == request.auth.uid;
+      allow update: if request.auth != null
+        && (resource.data.createdByUid == request.auth.uid
+            || resource.data.status == 'pending');
+    }
+
+    // Optional open trial (expire soon). Prefer the rules above for Split.
     // match /{document=**} {
     //   allow read, write: if request.time < timestamp.date(2026, 7, 29);
     // }

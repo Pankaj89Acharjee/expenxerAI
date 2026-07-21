@@ -3,10 +3,12 @@ import {
   deleteDoc,
   doc,
   getDocs,
+  onSnapshot,
   query,
   serverTimestamp,
   setDoc,
   where,
+  type Unsubscribe,
 } from 'firebase/firestore';
 import { getFirebaseFirestore } from '@/src/services/firebase';
 import { calculateSavingMetrics } from '@/src/utils/savingGoals';
@@ -300,16 +302,49 @@ export async function fetchGroups(uid: string): Promise<SplitGroup[]> {
   const snap = await getDocs(userCol(uid, 'split_groups'));
   return snap.docs
     .map((d) => {
-      const data = d.data();
-      const members = data.members;
+      const data = d.data() as Record<string, unknown>;
+      const rawMembers = Array.isArray(data.members)
+        ? data.members
+        : (() => {
+            try {
+              return JSON.parse(String(data.membersJson ?? '[]'));
+            } catch {
+              return [];
+            }
+          })();
+      const members = (rawMembers as unknown[]).map((raw, index) => {
+        if (typeof raw === 'string') {
+          return {
+            id: `legacy_${index}_${raw.toLowerCase().replace(/\s+/g, '_')}`,
+            uid: null,
+            displayName: raw.trim(),
+            email: null,
+            phoneNumber: null,
+            status: 'guest' as const,
+          };
+        }
+        const m = (raw ?? {}) as Record<string, unknown>;
+        return {
+          id: String(m.id ?? `member_${index}`),
+          uid: m.uid != null ? String(m.uid) : null,
+          displayName: String(m.displayName ?? m.name ?? 'Member'),
+          email: m.email != null ? String(m.email) : null,
+          phoneNumber: m.phoneNumber != null ? String(m.phoneNumber) : null,
+          status: (m.status as 'active' | 'guest' | 'invited') ?? (m.uid ? 'active' : 'guest'),
+        };
+      });
       return {
         id: d.id,
-        userEmail: String(data.userEmail ?? ''),
         name: String(data.name ?? ''),
-        members: Array.isArray(members) ? members.map(String) : JSON.parse(String(data.membersJson ?? '[]')),
+        createdByUid: String(data.createdByUid ?? ''),
+        createdByEmail: String(data.createdByEmail ?? data.userEmail ?? ''),
+        createdAtMillis: Number(data.createdAtMillis ?? 0),
+        members,
+        memberUids: members.map((m) => m.uid).filter((u): u is string => Boolean(u)),
+        userEmail: data.userEmail != null ? String(data.userEmail) : undefined,
       } satisfies SplitGroup;
     })
-    .sort((a, b) => b.id.localeCompare(a.id));
+    .sort((a, b) => b.createdAtMillis - a.createdAtMillis || b.id.localeCompare(a.id));
 }
 
 export async function createGroup(uid: string, group: Omit<SplitGroup, 'id'>): Promise<string> {
@@ -328,13 +363,28 @@ export async function fetchGroupExpenses(uid: string, groupId: string): Promise<
   return snap.docs
     .map((d) => {
       const data = d.data();
+      const paidByNames = Array.isArray(data.paidByNames)
+        ? data.paidByNames.map(String).filter(Boolean)
+        : undefined;
+      const splitAmongNames = Array.isArray(data.splitAmongNames)
+        ? data.splitAmongNames.map(String).filter(Boolean)
+        : undefined;
       return {
         id: d.id,
         userEmail: String(data.userEmail ?? ''),
         groupId: String(data.groupId ?? ''),
         title: String(data.title ?? ''),
         amount: Number(data.amount ?? 0),
-        paidBy: String(data.paidBy ?? ''),
+        paidBy: paidByNames?.length ? paidByNames.join(', ') : String(data.paidBy ?? ''),
+        paidByMemberId: data.paidByMemberId != null ? String(data.paidByMemberId) : null,
+        paidByNames,
+        paidByMemberIds: Array.isArray(data.paidByMemberIds)
+          ? data.paidByMemberIds.map(String)
+          : undefined,
+        splitAmongNames,
+        splitAmongMemberIds: Array.isArray(data.splitAmongMemberIds)
+          ? data.splitAmongMemberIds.map(String)
+          : undefined,
         splitType: String(data.splitType ?? 'EQUAL'),
         splitsJson: String(data.splitsJson ?? '{}'),
         dateMillis: Number(data.dateMillis ?? Date.now()),
@@ -350,6 +400,11 @@ export async function addGroupExpense(uid: string, expense: Omit<GroupExpense, '
     title: expense.title,
     amount: expense.amount,
     paidBy: expense.paidBy,
+    paidByMemberId: expense.paidByMemberId ?? null,
+    paidByNames: expense.paidByNames ?? [],
+    paidByMemberIds: expense.paidByMemberIds ?? [],
+    splitAmongNames: expense.splitAmongNames ?? [],
+    splitAmongMemberIds: expense.splitAmongMemberIds ?? [],
     splitType: expense.splitType,
     splitsJson: expense.splitsJson,
     dateMillis: expense.dateMillis,
@@ -388,6 +443,34 @@ export async function addCloudLog(
     timestamp: Date.now(),
     type,
   });
+}
+
+/** Live updates for the signed-in user's notification center. */
+export function subscribeUserLogs(
+  uid: string,
+  onData: (logs: NotificationLog[]) => void,
+  onError?: (error: Error) => void
+): Unsubscribe {
+  return onSnapshot(
+    userCol(uid, 'notification_logs'),
+    (snap) => {
+      const logs = snap.docs
+        .map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            userEmail: String(data.userEmail ?? ''),
+            title: String(data.title ?? ''),
+            message: String(data.message ?? ''),
+            timestamp: Number(data.timestamp ?? 0),
+            type: String(data.type ?? 'SYSTEM'),
+          } satisfies NotificationLog;
+        })
+        .sort((a, b) => b.timestamp - a.timestamp);
+      onData(logs);
+    },
+    (error) => onError?.(error)
+  );
 }
 
 // --- Budget Templates ---

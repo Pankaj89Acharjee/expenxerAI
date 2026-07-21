@@ -29,6 +29,26 @@ import {
   updateChatSessionTitle,
   uploadChatAttachment,
 } from '@/src/services/chatCloud';
+import {
+  addSharedGroupExpense,
+  addSharedGroupSettlement,
+  buildActiveMemberFromProfile,
+  buildGuestMember,
+  createSharedGroup,
+  fetchAllSharedExpensesForUser,
+  fetchLegacyGroupExpenses,
+  fetchSharedGroupExpenses,
+  fetchSharedGroupsForUser,
+  leaveSharedGroup,
+  removeSharedGroupMember,
+  subscribeSharedGroupExpenses,
+  subscribeSharedGroupSettlements,
+  subscribeSharedGroupsForUser,
+} from '@/src/services/splitGroupsCloud';
+import { claimPendingSplitInvites, prepareGuestInvite } from '@/src/services/splitInvitesCloud';
+import { searchRegisteredUsers } from '@/src/services/userDirectoryCloud';
+import { consumePendingInviteCode } from '@/src/utils/inviteLink';
+import { shareSplitInvite } from '@/src/utils/whatsappInvite';
 import { buildAdvisorSystemPrompt } from '@/src/utils/advisorContext';
 import { calculateMonthlyEmi } from '@/src/utils/emiCalculator';
 import { buildSchedule, buildLoanEmiSchedule, completeLiabilityPayment, isLoanLiability, mergeLiabilitySchedule, parseInstallments, serializeInstallments, settleInstallmentOnLiability, shouldRecordPayment, syncAllLiabilityPaymentStatuses } from '@/src/utils/liabilitySchedule';
@@ -60,12 +80,10 @@ import {
 import {
   addBill as addCloudBill,
   addCloudLog,
-  addGroupExpense as addCloudGroupExpense,
   addLiability as addCloudLiability,
   addSavingGoal as addCloudSavingGoal,
   addSubscription as addCloudSubscription,
   addTemplate as addCloudTemplate,
-  createGroup as createCloudGroup,
   deleteBill as deleteCloudBill,
   deleteCategoryBudgetsForMonth,
   deleteLiability as deleteCloudLiability,
@@ -74,19 +92,19 @@ import {
   deleteTemplate as deleteCloudTemplate,
   fetchBills,
   fetchCategoryBudgets,
-  fetchGroupExpenses,
-  fetchGroups,
   fetchLiabilities,
   fetchLogs,
   fetchSavingGoals,
   fetchSubscriptions,
   fetchTemplates,
   saveCategoryBudgets,
+  subscribeUserLogs,
   updateBill as updateCloudBill,
   updateLiability as updateCloudLiability,
   updateSavingGoal as updateCloudSavingGoal,
   updateSubscription as updateCloudSubscription,
 } from '@/src/services/userDataCloud';
+import { notifySplitGroupMembers } from '@/src/utils/splitNotifications';
 import type {
   BudgetTemplate,
   Bill,
@@ -96,12 +114,15 @@ import type {
   ChatSession,
   Expense,
   GroupExpense,
+  GroupSettlement,
   Liability,
   LiabilityKind,
   NotificationLog,
   SavingGoal,
   SplitGroup,
+  SplitMember,
   Subscription,
+  UserDirectoryHit,
   UserProfile,
 } from '@/src/types/models';
 import { ADVISOR_WELCOME_TEXT } from '@/src/types/models';
@@ -116,6 +137,111 @@ const PREFS = {
 
 let authUnsubscribe: (() => void) | null = null;
 let plannerExpenseBackfillRunning = false;
+let splitGroupsUnsubscribe: (() => void) | null = null;
+let userLogsUnsubscribe: (() => void) | null = null;
+const splitExpenseUnsubscribes = new Map<string, () => void>();
+const splitSettlementUnsubscribes = new Map<string, () => void>();
+let legacySplitExpensesCache: GroupExpense[] = [];
+const sharedExpensesByGroupId = new Map<string, GroupExpense[]>();
+const sharedSettlementsByGroupId = new Map<string, GroupSettlement[]>();
+
+function stopSplitRealtime() {
+  splitGroupsUnsubscribe?.();
+  splitGroupsUnsubscribe = null;
+  userLogsUnsubscribe?.();
+  userLogsUnsubscribe = null;
+  splitExpenseUnsubscribes.forEach((unsub) => unsub());
+  splitExpenseUnsubscribes.clear();
+  splitSettlementUnsubscribes.forEach((unsub) => unsub());
+  splitSettlementUnsubscribes.clear();
+  sharedExpensesByGroupId.clear();
+  sharedSettlementsByGroupId.clear();
+  legacySplitExpensesCache = [];
+}
+
+function publishSplitExpenses(
+  set: (partial: Partial<FinancialState> | ((s: FinancialState) => Partial<FinancialState>)) => void,
+  get: () => FinancialState
+) {
+  const shared = [...sharedExpensesByGroupId.values()].flat();
+  const allGroupExpenses = [...shared, ...legacySplitExpensesCache].sort(
+    (a, b) => b.dateMillis - a.dateMillis
+  );
+  const allGroupSettlements = [...sharedSettlementsByGroupId.values()].flat();
+  const selectedGroupId = get().selectedGroupId;
+  const patch: Partial<FinancialState> = { allGroupExpenses, allGroupSettlements };
+  if (selectedGroupId) {
+    patch.groupExpenses =
+      sharedExpensesByGroupId.get(selectedGroupId) ??
+      allGroupExpenses.filter((e) => e.groupId === selectedGroupId);
+    patch.groupSettlements = sharedSettlementsByGroupId.get(selectedGroupId) ?? [];
+  }
+  set(patch);
+}
+
+function syncSharedExpenseListeners(
+  groupIds: string[],
+  set: (partial: Partial<FinancialState> | ((s: FinancialState) => Partial<FinancialState>)) => void,
+  get: () => FinancialState
+) {
+  const wanted = new Set(groupIds);
+  for (const [groupId, unsub] of splitExpenseUnsubscribes) {
+    if (!wanted.has(groupId)) {
+      unsub();
+      splitExpenseUnsubscribes.delete(groupId);
+      sharedExpensesByGroupId.delete(groupId);
+    }
+  }
+  for (const [groupId, unsub] of splitSettlementUnsubscribes) {
+    if (!wanted.has(groupId)) {
+      unsub();
+      splitSettlementUnsubscribes.delete(groupId);
+      sharedSettlementsByGroupId.delete(groupId);
+    }
+  }
+  for (const groupId of groupIds) {
+    if (!splitExpenseUnsubscribes.has(groupId)) {
+      const unsub = subscribeSharedGroupExpenses(groupId, (expenses) => {
+        sharedExpensesByGroupId.set(groupId, expenses);
+        publishSplitExpenses(set, get);
+      });
+      splitExpenseUnsubscribes.set(groupId, unsub);
+    }
+    if (!splitSettlementUnsubscribes.has(groupId)) {
+      const unsub = subscribeSharedGroupSettlements(groupId, (settlements) => {
+        sharedSettlementsByGroupId.set(groupId, settlements);
+        publishSplitExpenses(set, get);
+      });
+      splitSettlementUnsubscribes.set(groupId, unsub);
+    }
+  }
+  publishSplitExpenses(set, get);
+}
+
+function startSplitRealtime(
+  uid: string,
+  set: (partial: Partial<FinancialState> | ((s: FinancialState) => Partial<FinancialState>)) => void,
+  get: () => FinancialState
+) {
+  splitGroupsUnsubscribe?.();
+  splitGroupsUnsubscribe = subscribeSharedGroupsForUser(uid, (sharedGroups) => {
+    const legacyGroups = get().groups.filter((g) => !g.createdByUid);
+    const byId = new Map<string, SplitGroup>();
+    for (const g of [...legacyGroups, ...sharedGroups]) byId.set(g.id, g);
+    const groups = [...byId.values()].sort((a, b) => b.createdAtMillis - a.createdAtMillis);
+    set({ groups });
+    syncSharedExpenseListeners(
+      sharedGroups.map((g) => g.id),
+      set,
+      get
+    );
+  });
+
+  userLogsUnsubscribe?.();
+  userLogsUnsubscribe = subscribeUserLogs(uid, (logs) => {
+    set({ logs });
+  });
+}
 
 function currentUid(): string | null {
   return getFirebaseAuth().currentUser?.uid ?? null;
@@ -130,12 +256,20 @@ async function ensureUserProfile(
   const existing = await fetchCloudProfile(uid);
   if (existing) {
     const firebaseName = authDisplayName?.trim();
+    let next = existing;
+    let dirty = false;
     if (firebaseName && existing.displayName !== firebaseName) {
-      const updated = { ...existing, displayName: firebaseName };
-      await saveCloudProfile(uid, updated);
-      return updated;
+      next = { ...next, displayName: firebaseName };
+      dirty = true;
     }
-    return existing;
+    // Backfill searchKeys / phone so older profiles become discoverable in Split.
+    if (!existing.searchKeys?.length) {
+      dirty = true;
+    }
+    if (dirty) {
+      await saveCloudProfile(uid, next);
+    }
+    return next;
   }
 
   const profile: UserProfile = {
@@ -163,6 +297,8 @@ function clearUserState() {
     groups: [] as SplitGroup[],
     groupExpenses: [] as GroupExpense[],
     allGroupExpenses: [] as GroupExpense[],
+    groupSettlements: [] as GroupSettlement[],
+    allGroupSettlements: [] as GroupSettlement[],
     logs: [] as NotificationLog[],
     budgetTemplates: [] as BudgetTemplate[],
     categoryBudgets: [] as CategoryBudget[],
@@ -196,11 +332,13 @@ interface FinancialState {
   savingGoals: SavingGoal[];
   groups: SplitGroup[];
   groupExpenses: GroupExpense[];
+  groupSettlements: GroupSettlement[];
   logs: NotificationLog[];
   budgetTemplates: BudgetTemplate[];
   categoryBudgets: CategoryBudget[];
   selectedGroupId: string | null;
   allGroupExpenses: GroupExpense[];
+  allGroupSettlements: GroupSettlement[];
   chatSessions: ChatSession[];
   activeChatSessionId: string | null;
   aiCoachChat: ChatMessage[];
@@ -288,8 +426,25 @@ interface FinancialState {
   deleteSavingGoal: (goal: SavingGoal) => Promise<void>;
 
   selectGroup: (groupId: string | null) => Promise<void>;
-  createGroup: (name: string, members: string[]) => Promise<void>;
-  addGroupExpense: (groupId: string, title: string, amount: number, paidBy: string) => Promise<void>;
+  searchSplitUsers: (query: string) => Promise<UserDirectoryHit[]>;
+  createGroup: (name: string, members: SplitMember[] | string[]) => Promise<void>;
+  addGroupExpense: (
+    groupId: string,
+    title: string,
+    amount: number,
+    paidByNames: string[],
+    splitAmongNames?: string[]
+  ) => Promise<void>;
+  markSplitSettlementPaid: (groupId: string, flow: { debtor: string; creditor: string; amount: number }) => Promise<string | null>;
+  removeSplitMember: (groupId: string, memberId: string) => Promise<string | null>;
+  leaveSplitGroup: (groupId: string) => Promise<string | null>;
+  inviteToGroupViaWhatsApp: (input: {
+    groupId: string;
+    displayName: string;
+    phoneNumber?: string | null;
+    existingMemberId?: string | null;
+  }) => Promise<string | null>;
+  claimPendingInvites: () => Promise<{ groupId: string; groupName: string }[]>;
 
   addTemplate: (name: string, monthlyIncome: number, allocations: Record<string, number>, savingsGoals: Record<string, number>) => Promise<void>;
   deleteTemplate: (template: BudgetTemplate) => Promise<void>;
@@ -319,11 +474,13 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   savingGoals: [],
   groups: [],
   groupExpenses: [],
+  groupSettlements: [],
   logs: [],
   budgetTemplates: [],
   categoryBudgets: [],
   selectedGroupId: null,
   allGroupExpenses: [],
+  allGroupSettlements: [],
   chatSessions: [],
   activeChatSessionId: null,
   aiCoachChat: [],
@@ -356,10 +513,21 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       let resolved = false;
       authUnsubscribe = subscribeToAuthChanges(async (user) => {
         if (user?.email && user.uid) {
-          await ensureUserProfile(user.uid, user.email, user.displayName);
-          set({ currentUserEmail: user.email });
+          const profile = await ensureUserProfile(user.uid, user.email, user.displayName);
+          set({ currentUserEmail: user.email, userProfile: profile });
+          try {
+            const preferCode = await consumePendingInviteCode();
+            await claimPendingSplitInvites({
+              uid: user.uid,
+              profile,
+              preferCode,
+            });
+          } catch {
+            // Invite claim is best-effort; user can reopen the link later.
+          }
           await get().refreshUserData();
         } else {
+          stopSplitRealtime();
           set(clearUserState());
         }
         set({ initialized: true });
@@ -377,24 +545,44 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     if (!email || !uid) return;
 
     const monthYear = currentMonthYear();
-    const [profile, expensesRaw, subscriptions, bills, savingGoals, groups, logs, budgetTemplates, categoryBudgets, allGroupExpenses] =
+    const [profile, expensesRaw, subscriptions, bills, savingGoals, logs, budgetTemplates, categoryBudgets] =
       await Promise.all([
         fetchCloudProfile(uid),
         fetchCloudExpenses(uid),
         fetchSubscriptions(uid),
         fetchBills(uid),
         fetchSavingGoals(uid),
-        fetchGroups(uid),
         fetchLogs(uid),
         fetchTemplates(uid),
         fetchCategoryBudgets(uid, monthYear),
-        fetchAllGroupExpenses(uid),
       ]);
     const liabilitiesRaw = await fetchLiabilities(uid);
     const { liabilities, changed } = syncAllLiabilityPaymentStatuses(liabilitiesRaw);
     if (changed.length > 0) {
       await Promise.all(changed.map((liability) => updateCloudLiability(uid, liability)));
     }
+
+    const [groups, sharedExpenses, legacyAllExpenses] = await Promise.all([
+      fetchSharedGroupsForUser(uid, email),
+      fetchAllSharedExpensesForUser(uid),
+      fetchAllGroupExpenses(uid),
+    ]);
+    legacySplitExpensesCache = legacyAllExpenses;
+    sharedExpensesByGroupId.clear();
+    for (const expense of sharedExpenses) {
+      const list = sharedExpensesByGroupId.get(expense.groupId) ?? [];
+      list.push(expense);
+      sharedExpensesByGroupId.set(expense.groupId, list);
+    }
+    for (const [groupId, list] of sharedExpensesByGroupId) {
+      sharedExpensesByGroupId.set(
+        groupId,
+        [...list].sort((a, b) => b.dateMillis - a.dateMillis)
+      );
+    }
+    const allGroupExpenses = [...sharedExpenses, ...legacyAllExpenses].sort(
+      (a, b) => b.dateMillis - a.dateMillis
+    );
 
     // Paint UI immediately — deferred backfill must not block FlatList updates.
     set({
@@ -411,6 +599,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       allGroupExpenses,
     });
     await get().refreshGroupExpenses();
+    startSplitRealtime(uid, set, get);
     void get().refreshChat();
 
     if (plannerExpenseBackfillRunning) return;
@@ -469,10 +658,23 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     const uid = currentUid();
     const groupId = get().selectedGroupId;
     if (!uid || groupId == null) {
-      set({ groupExpenses: [] });
+      set({ groupExpenses: [], groupSettlements: [] });
       return;
     }
-    const groupExpenses = await fetchGroupExpenses(uid, groupId);
+    const group = get().groups.find((g) => g.id === groupId);
+    const isShared = Boolean(group?.createdByUid);
+    if (isShared) {
+      const cached = sharedExpensesByGroupId.get(groupId);
+      if (cached) {
+        set({ groupExpenses: cached });
+        return;
+      }
+      const groupExpenses = await fetchSharedGroupExpenses(groupId);
+      sharedExpensesByGroupId.set(groupId, groupExpenses);
+      set({ groupExpenses });
+      return;
+    }
+    const groupExpenses = await fetchLegacyGroupExpenses(uid, groupId);
     set({ groupExpenses });
   },
 
@@ -518,6 +720,12 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
     await updateAuthDisplayName(profile.displayName);
     if (profile.photoUrl) await updateAuthPhotoUrl(profile.photoUrl);
     await addCloudLog(uid, email, 'Profile Updated', 'Customized profile adjustments successfully stored.', 'SYSTEM');
+    set({ userProfile: profile });
+    try {
+      await claimPendingSplitInvites({ uid, profile });
+    } catch {
+      // best-effort
+    }
     await get().refreshUserData();
   },
 
@@ -1019,36 +1227,308 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   },
 
   selectGroup: async (groupId) => {
-    set({ selectedGroupId: groupId });
+    set({
+      selectedGroupId: groupId,
+      groupSettlements: groupId ? sharedSettlementsByGroupId.get(groupId) ?? [] : [],
+    });
     await get().refreshGroupExpenses();
+  },
+
+  searchSplitUsers: async (query) => {
+    const uid = currentUid();
+    if (!uid) return [];
+    return searchRegisteredUsers(query, { excludeUid: uid, max: 20 });
   },
 
   createGroup: async (name, members) => {
     const email = get().currentUserEmail;
     const uid = currentUid();
-    if (!email || !uid) return;
-    await createCloudGroup(uid, { userEmail: email, name, members });
-    await addCloudLog(uid, email, 'Group Created', `Split group '${name}' created with ${members.length} members.`, 'SYSTEM');
+    const profile = get().userProfile;
+    if (!email || !uid || !profile) return;
+
+    const creator = buildActiveMemberFromProfile({
+      uid,
+      displayName: profile.displayName,
+      email: profile.email,
+      phoneNumber: profile.phoneNumber,
+    });
+
+    const normalized: SplitMember[] = (members as (string | SplitMember)[]).map((m) => {
+      if (typeof m === 'string') {
+        return buildGuestMember({ displayName: m });
+      }
+      return m;
+    });
+
+    const withoutCreator = normalized.filter((m) => m.uid !== uid);
+    const allMembers = [creator, ...withoutCreator];
+
+    await createSharedGroup({
+      name,
+      createdByUid: uid,
+      createdByEmail: email,
+      members: allMembers,
+    });
+    await notifySplitGroupMembers(
+      { name, members: allMembers },
+      'Split Group Created',
+      `${profile.displayName} created "${name}" and is the group Admin.`,
+      'SPLIT'
+    );
     await get().refreshUserData();
   },
 
-  addGroupExpense: async (groupId, title, amount, paidBy) => {
+  addGroupExpense: async (groupId, title, amount, paidByNames, splitAmongNames) => {
     const email = get().currentUserEmail;
     const uid = currentUid();
     if (!email || !uid) return;
-    await addCloudGroupExpense(uid, {
+    const group = get().groups.find((g) => g.id === groupId);
+    const names = paidByNames.map((n) => n.trim()).filter(Boolean);
+    if (names.length === 0) return;
+
+    const resolveMembers = (rawNames: string[]) =>
+      rawNames.map((name) => {
+        const member = group?.members.find((m) => m.displayName === name || m.id === name);
+        return {
+          name: member?.displayName ?? name,
+          id: member?.id ?? null,
+        };
+      });
+
+    const payers = resolveMembers(names);
+    const displayNames = payers.map((p) => p.name);
+
+    const allMemberNames = group ? group.members.map((m) => m.displayName) : displayNames;
+    const splitRaw =
+      Array.isArray(splitAmongNames) && splitAmongNames.length > 0
+        ? splitAmongNames.map((n) => n.trim()).filter(Boolean)
+        : allMemberNames;
+    const splitMembers = resolveMembers(splitRaw);
+    const splitDisplayNames = splitMembers.map((m) => m.name);
+    if (splitDisplayNames.length === 0) return;
+
+    const payload = {
       userEmail: email,
       groupId,
       title,
       amount,
-      paidBy,
+      paidBy: displayNames.join(', '),
+      paidByMemberId: payers.length === 1 ? payers[0].id : null,
+      paidByNames: displayNames,
+      paidByMemberIds: payers.map((p) => p.id).filter((id): id is string => Boolean(id)),
+      splitAmongNames: splitDisplayNames,
+      splitAmongMemberIds: splitMembers.map((m) => m.id).filter((id): id is string => Boolean(id)),
       splitType: 'EQUAL',
       splitsJson: '{}',
       dateMillis: Date.now(),
-    });
+    };
+
+    if (group?.createdByUid) {
+      await addSharedGroupExpense(groupId, payload);
+      const actor = group.members.find((m) => m.uid === uid)?.displayName ?? email;
+      const forLabel =
+        splitDisplayNames.length === allMemberNames.length
+          ? 'everyone'
+          : splitDisplayNames.join(', ');
+      await notifySplitGroupMembers(
+        group,
+        'Split Expense Added',
+        `${actor} added "${title}" (₹${amount}) in "${group.name}". Paid by ${displayNames.join(', ')} for ${forLabel}.`,
+        'SPLIT'
+      );
+      return;
+    }
+
+    const { addGroupExpense: addLegacy } = await import('@/src/services/userDataCloud');
+    await addLegacy(uid, payload);
     await addCloudLog(uid, email, 'Split Expense', `Split expense '${title}' for ₹${amount} added to group.`, 'SYSTEM');
     await get().refreshGroupExpenses();
-    await get().refreshUserData();
+    const refreshed = get().groupExpenses;
+    const rest = get().allGroupExpenses.filter((e) => e.groupId !== groupId);
+    set({
+      allGroupExpenses: [...refreshed, ...rest].sort((a, b) => b.dateMillis - a.dateMillis),
+    });
+  },
+
+  markSplitSettlementPaid: async (groupId, flow) => {
+    const uid = currentUid();
+    const email = get().currentUserEmail;
+    if (!uid || !email) return 'Sign in required.';
+    const group = get().groups.find((g) => g.id === groupId);
+    if (!group?.createdByUid && !group?.createdByEmail) {
+      return 'Settlements are only supported on shared groups.';
+    }
+    if (!group.memberUids.includes(uid)) return 'Not a group member.';
+    if (flow.amount <= 0) return 'Invalid amount.';
+
+    const { isGroupAdmin } = await import('@/src/types/models');
+    const selfMember = group.members.find((m) => m.uid === uid);
+    const selfName = selfMember?.displayName ?? '';
+    const isBorrower = Boolean(selfName && flow.debtor === selfName);
+    const isLender = Boolean(selfName && flow.creditor === selfName);
+    const admin = isGroupAdmin(group, uid);
+    if (!isBorrower && !isLender && !admin) {
+      return 'You can only settle amounts you borrowed or lent.';
+    }
+
+    try {
+      const dateMillis = Date.now();
+      const settlementId = await addSharedGroupSettlement(groupId, {
+        debtor: flow.debtor,
+        creditor: flow.creditor,
+        amount: flow.amount,
+        dateMillis,
+        recordedByUid: uid,
+        note: null,
+      });
+
+      // Record personal expense for the borrower (person who pays to settle).
+      if (isBorrower) {
+        const alreadyLogged = get().expenses.some(
+          (e) => e.sourceType === 'split_settlement' && e.sourceSettlementId === settlementId
+        );
+        if (!alreadyLogged) {
+          await saveCloudExpense(uid, {
+            userEmail: email,
+            title: `Split · ${group.name}`,
+            amount: flow.amount,
+            category: 'Split',
+            dateMillis,
+            notes: `Paid ${flow.creditor} to settle borrowed amount in "${group.name}".`,
+            receiptPath: null,
+            sourceType: 'split_settlement',
+            sourceGroupId: groupId,
+            sourceSettlementId: settlementId,
+          });
+          await get().refreshUserData();
+        }
+      }
+
+      const actor = selfName || email;
+      await notifySplitGroupMembers(
+        group,
+        'Split Settled',
+        `${actor}: ${flow.debtor} paid ${flow.creditor} ₹${flow.amount.toFixed(2)} in "${group.name}".`,
+        'SPLIT'
+      );
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Could not record settlement.';
+    }
+  },
+
+  removeSplitMember: async (groupId, memberId) => {
+    const uid = currentUid();
+    const email = get().currentUserEmail;
+    if (!uid || !email) return 'Sign in required.';
+    const group = get().groups.find((g) => g.id === groupId);
+    const removed = group?.members.find((m) => m.id === memberId);
+    try {
+      await removeSharedGroupMember({ groupId, memberId, actorUid: uid });
+      if (group) {
+        const actor = group.members.find((m) => m.uid === uid)?.displayName ?? email;
+        await notifySplitGroupMembers(
+          group,
+          'Split Member Removed',
+          `${actor} removed ${removed?.displayName ?? 'a member'} from "${group.name}".`,
+          'SPLIT'
+        );
+      }
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Could not remove member.';
+    }
+  },
+
+  leaveSplitGroup: async (groupId) => {
+    const uid = currentUid();
+    const email = get().currentUserEmail;
+    if (!uid || !email) return 'Sign in required.';
+    const group = get().groups.find((g) => g.id === groupId);
+    const leaver = group?.members.find((m) => m.uid === uid)?.displayName ?? email;
+    try {
+      // Notify remaining members before leave mutates membership.
+      if (group) {
+        const remaining = {
+          name: group.name,
+          members: group.members.filter((m) => m.uid !== uid),
+        };
+        await notifySplitGroupMembers(
+          remaining,
+          'Left Split Group',
+          `${leaver} left "${group.name}".`,
+          'SPLIT'
+        );
+        await addCloudLog(uid, email, 'Left Split Group', `You left "${group.name}".`, 'SPLIT');
+      }
+      await leaveSharedGroup({ groupId, uid });
+      if (get().selectedGroupId === groupId) {
+        set({ selectedGroupId: null, groupExpenses: [], groupSettlements: [] });
+      }
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Could not leave group.';
+    }
+  },
+
+  inviteToGroupViaWhatsApp: async ({ groupId, displayName, phoneNumber, existingMemberId }) => {
+    const uid = currentUid();
+    const profile = get().userProfile;
+    if (!uid || !profile) return 'Sign in required.';
+    const name = displayName.trim();
+    if (!name) return 'Enter a name for the invite.';
+
+    try {
+      const { invite } = await prepareGuestInvite({
+        groupId,
+        createdByUid: uid,
+        displayName: name,
+        phoneNumber: phoneNumber ?? null,
+        existingMemberId: existingMemberId ?? null,
+      });
+      await shareSplitInvite({
+        groupName: invite.groupName,
+        inviterName: profile.displayName,
+        inviteCode: invite.code,
+        phoneNumber: phoneNumber ?? invite.invitedPhone,
+      });
+      const group = get().groups.find((g) => g.id === groupId);
+      if (group) {
+        await notifySplitGroupMembers(
+          group,
+          'Split Invite Sent',
+          `${profile.displayName} invited ${name} to "${group.name}" via WhatsApp.`,
+          'SPLIT'
+        );
+      }
+      await get().refreshUserData();
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : 'Could not create invite.';
+    }
+  },
+
+  claimPendingInvites: async () => {
+    const uid = currentUid();
+    const profile = get().userProfile;
+    if (!uid || !profile) return [];
+    const preferCode = await consumePendingInviteCode();
+    const claimed = await claimPendingSplitInvites({ uid, profile, preferCode });
+    if (claimed.length > 0) {
+      await get().refreshUserData();
+      for (const hit of claimed) {
+        const group = get().groups.find((g) => g.id === hit.groupId);
+        if (group) {
+          await notifySplitGroupMembers(
+            group,
+            'Split Invite Claimed',
+            `${profile.displayName} joined "${hit.groupName}".`,
+            'SPLIT'
+          );
+        }
+      }
+    }
+    return claimed;
   },
 
   addTemplate: async (name, monthlyIncome, allocations, savingsGoals) => {
@@ -1285,6 +1765,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       budgetTemplates: state.budgetTemplates,
       groups: state.groups,
       groupExpenses: state.allGroupExpenses,
+      groupSettlements: state.allGroupSettlements,
     });
 
     const history = get().aiCoachChat.filter((m) => m.id !== savedUserId);
