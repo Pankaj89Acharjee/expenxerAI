@@ -344,6 +344,10 @@ Right-click the `app-release.apk` file inside Cursor and select **Reveal in File
 
 Current foundation: Gemini Advisor chat (full financial context, images, voice), AI expense categorization, and dashboard charts (spend / category / split). Forecasts today are mostly arithmetic (saving goals, EMI math), not trained ML. The roadmap below focuses on agents that *act*, proactive insights, Advisor analytics, and real-world money features.
 
+### Event Management
+
+User can create a custom event with date, plan items, log expenses, generate report on expenses.
+
 ### AI agents (do work, not just chat)
 
 - **Expense logger agent** — “Spent ₹450 on Swiggy” → creates the expense with category and date
@@ -422,3 +426,40 @@ For personal finance, **stats + LLM explanation** usually beats heavy ML until h
 2. Action agents (log expense / set budget / settle split) with user confirmation
 3. Proactive anomaly / spend-spike digests (push + Advisor)
 4. Advisor-embedded charts and usual-vs-current spend comparison
+
+### Notification as a Backend Service
+If you need notifications to arrive reliably when the app has not recently opened, you need remote push notifications:
+
+```
+Scheduled backend job
+→ Run LangGraph agent on server
+→ Expo Push Service / FCM
+→ Standard Android notification
+```
+The current mobile-only LangGraph cannot continuously watch dates after Android terminates the app. Android background execution is restricted, and Expo background tasks are not exact-time schedulers.
+For production, the LangGraph agent must run on a backend such as:
+- **Firebase scheduled Cloud Function**
+- **Cloud Run with Cloud Scheduler**
+- **LangGraph Agent Server**
+The phone should only register its push token and receive the notification through `expo-notifications`. Remote notifications also appear as normal Android notifications.
+
+
+
+## Security Issue in code
+
+### Important security fixes before deployment
+
+Two current issues should be fixed before building the agent:
+- The README contains an Expo account password. Remove it from Git history and rotate the password immediately. Assume it is compromised once committed.
+
+- The current Firestore rules allow every authenticated user to read every `users/{uid}` document. That document contains `expoPushToken`. Push tokens should not be publicly readable.
+
+```firebase
+users/{uid}                         // public-safe profile
+users/{uid}/private/profile         // private preferences
+users/{uid}/devices/{deviceId}      // push token, platform, lastSeen
+
+```
+
+Only the owner and trusted backend should access device tokens.
+Also move push sending out of `src/services/pushNotifications.ts`. A mobile client should register its own token, but only the backend should send notifications. Otherwise an altered client could send arbitrary notifications or abuse exposed tokens.

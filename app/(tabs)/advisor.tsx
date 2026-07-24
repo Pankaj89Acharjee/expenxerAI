@@ -30,6 +30,13 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColorScheme } from '@/components/useColorScheme';
 import { ChatMarkdown } from '@/src/components/advisor/ChatMarkdown';
+import { FORM_CATEGORIES } from '@/src/constants/categories';
+import {
+  finishExpenseAgentAction,
+  prepareExpenseAgentAction,
+  type PendingExpenseAgentAction,
+} from '@/src/services/expenseAgent';
+import { presentExpenseLoggedNotification } from '@/src/services/pushNotifications';
 import { useFinancialStore } from '@/src/store/useFinancialStore';
 import { themeColors } from '@/src/theme/colors';
 import { buildTabBarStyle } from '@/src/theme/tabBar';
@@ -40,6 +47,7 @@ const QUICK_PROMPTS = [
   'Compare my spending vs budget',
   'What recurring items do I buy?',
   'Summarise my liabilities',
+  'Log ₹450 spent on Swiggy today',
 ];
 
 type PendingAttachment = Omit<ChatAttachment, 'id' | 'storageUrl'>;
@@ -73,6 +81,7 @@ export default function AdvisorScreen() {
   const deleteChatSessionById = useFinancialStore((s) => s.deleteChatSessionById);
   const clearCurrentChat = useFinancialStore((s) => s.clearCurrentChat);
   const transcribeVoiceNote = useFinancialStore((s) => s.transcribeVoiceNote);
+  const addExpense = useFinancialStore((s) => s.addExpense);
 
   const [input, setInput] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
@@ -81,7 +90,14 @@ export default function AdvisorScreen() {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [composerHeight, setComposerHeight] = useState(72);
   const [inputFocused, setInputFocused] = useState(false);
+  const [pendingAgentAction, setPendingAgentAction] = useState<PendingExpenseAgentAction | null>(null);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [draftAmount, setDraftAmount] = useState('');
+  const [draftCategory, setDraftCategory] = useState('Other');
+  const [draftNotes, setDraftNotes] = useState('');
+  const [isConfirmingExpense, setIsConfirmingExpense] = useState(false);
   const listRef = useRef<FlatList>(null);
+  const confirmingExpenseRef = useRef(false);
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
 
   const tabBarStyle = useMemo(
@@ -121,7 +137,73 @@ export default function AdvisorScreen() {
     const attachments = [...pendingAttachments];
     setInput('');
     setPendingAttachments([]);
+    const looksLikeExpense =
+      !attachments.length &&
+      (/(?:spent|paid|bought|expense|log|add|₹|\brs\.?\b)/i.test(msg) || /^\D{2,40}\s+\d+(?:\.\d+)?\s*$/.test(msg));
+    if (looksLikeExpense) {
+      try {
+        const action = await prepareExpenseAgentAction(msg);
+        if (action) {
+          setPendingAgentAction(action);
+          setDraftTitle(action.draft.title);
+          setDraftAmount(action.draft.amount?.toString() ?? '');
+          setDraftCategory(action.draft.category);
+          setDraftNotes(action.draft.notes);
+          return;
+        }
+      } catch {
+        // Fall through to the normal Advisor when agent parsing is unavailable.
+      }
+    }
     await sendChatMessage(msg, attachments);
+  };
+
+  const cancelExpenseDraft = async () => {
+    const action = pendingAgentAction;
+    setPendingAgentAction(null);
+    if (action) {
+      await finishExpenseAgentAction(action.runId, 'cancelled', action.draft).catch(() => undefined);
+    }
+  };
+
+  const confirmExpenseDraft = async () => {
+    const action = pendingAgentAction;
+    if (!action || confirmingExpenseRef.current) return;
+    const amount = Number(draftAmount);
+    if (!draftTitle.trim() || !Number.isFinite(amount) || amount <= 0) {
+      Alert.alert('Check expense', 'Enter a title and a positive amount.');
+      return;
+    }
+    const finalDraft = {
+      ...action.draft,
+      title: draftTitle.trim(),
+      amount,
+      category: draftCategory,
+      notes: draftNotes.trim(),
+      missingFields: [],
+    };
+    confirmingExpenseRef.current = true;
+    setIsConfirmingExpense(true);
+    const error = await addExpense(
+      finalDraft.title,
+      amount,
+      finalDraft.category,
+      finalDraft.notes || 'Logged by Expense Agent',
+      finalDraft.dateMillis
+    );
+    if (error) {
+      await finishExpenseAgentAction(action.runId, 'failed', finalDraft, error).catch(() => undefined);
+      confirmingExpenseRef.current = false;
+      setIsConfirmingExpense(false);
+      Alert.alert('Save failed', error);
+      return;
+    }
+    await finishExpenseAgentAction(action.runId, 'confirmed', finalDraft).catch(() => undefined);
+    await presentExpenseLoggedNotification(finalDraft.title, amount, finalDraft.category).catch(() => undefined);
+    confirmingExpenseRef.current = false;
+    setIsConfirmingExpense(false);
+    setPendingAgentAction(null);
+    Alert.alert('Expense logged', `₹${amount.toLocaleString('en-IN')} for ${finalDraft.title} was saved.`);
   };
 
   const pickImage = async (useCamera: boolean) => {
@@ -514,6 +596,91 @@ export default function AdvisorScreen() {
         {composer}
       </KeyboardStickyView>
 
+      <Modal
+        visible={pendingAgentAction != null}
+        animationType="fade"
+        transparent
+        onRequestClose={cancelExpenseDraft}
+      >
+        <View style={styles.expenseModalOverlay}>
+          <View style={[styles.expenseDraftSheet, { backgroundColor: colors.card }]}>
+            <View style={styles.sessionHeader}>
+              <View>
+                <Text style={[styles.sessionTitle, { color: colors.text }]}>Confirm expense</Text>
+                <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 3 }}>
+                  Review the AI draft before it is saved
+                </Text>
+              </View>
+              <Pressable onPress={cancelExpenseDraft} hitSlop={12}>
+                <MaterialIcons name="close" size={24} color={colors.textMuted} />
+              </Pressable>
+            </View>
+
+            <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>Title</Text>
+            <TextInput
+              value={draftTitle}
+              onChangeText={setDraftTitle}
+              placeholder="What was the expense?"
+              placeholderTextColor={colors.textMuted}
+              style={[styles.draftInput, { color: colors.text, borderColor: colors.border }]}
+            />
+            <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>Amount (₹)</Text>
+            <TextInput
+              value={draftAmount}
+              onChangeText={setDraftAmount}
+              keyboardType="decimal-pad"
+              placeholder="0"
+              placeholderTextColor={colors.textMuted}
+              style={[styles.draftInput, { color: colors.text, borderColor: colors.border }]}
+            />
+            <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>Category</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.categoryRow}>
+              {FORM_CATEGORIES.map((category) => (
+                <Pressable
+                  key={category}
+                  onPress={() => setDraftCategory(category)}
+                  style={[
+                    styles.categoryChip,
+                    {
+                      borderColor: draftCategory === category ? colors.primary : colors.border,
+                      backgroundColor: draftCategory === category ? colors.primary : colors.card,
+                    },
+                  ]}
+                >
+                  <Text style={{ color: draftCategory === category ? '#fff' : colors.text, fontSize: 12 }}>
+                    {category}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <Text style={[styles.fieldLabel, { color: colors.textMuted }]}>Notes</Text>
+            <TextInput
+              value={draftNotes}
+              onChangeText={setDraftNotes}
+              placeholder="Optional notes"
+              placeholderTextColor={colors.textMuted}
+              style={[styles.draftInput, styles.notesInput, { color: colors.text, borderColor: colors.border }]}
+              multiline
+            />
+            <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 10 }}>
+              Date: {pendingAgentAction ? new Date(pendingAgentAction.draft.dateMillis).toLocaleString('en-IN') : ''}
+            </Text>
+            <View style={styles.draftActions}>
+              <Pressable style={[styles.draftButton, { borderColor: colors.border }]} onPress={cancelExpenseDraft}>
+                <Text style={{ color: colors.text }}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.draftButton, { backgroundColor: colors.primary, borderColor: colors.primary }]}
+                onPress={confirmExpenseDraft}
+                disabled={isConfirmingExpense}
+              >
+                {isConfirmingExpense ? <ActivityIndicator color="#fff" /> : <Text style={{ color: '#fff', fontWeight: '700' }}>Confirm & save</Text>}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={showSessions} animationType="slide" transparent onRequestClose={() => setShowSessions(false)}>
         <Pressable style={styles.modalOverlay} onPress={() => setShowSessions(false)}>
           <Pressable
@@ -621,6 +788,29 @@ const styles = StyleSheet.create({
   bubble: { borderRadius: 18, paddingHorizontal: 14, paddingVertical: 12, gap: 8 },
   userBubble: { borderBottomRightRadius: 6 },
   botBubble: { borderBottomLeftRadius: 6 },
+  expenseModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 24,
+  },
+  expenseDraftSheet: {
+    width: '100%',
+    maxWidth: 640,
+    maxHeight: '90%',
+    alignSelf: 'center',
+    padding: 20,
+    borderRadius: 20,
+  },
+  fieldLabel: { fontSize: 12, fontWeight: '600', marginTop: 14, marginBottom: 6 },
+  draftInput: { borderWidth: 1, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 11, fontSize: 15 },
+  notesInput: { minHeight: 68, textAlignVertical: 'top' },
+  categoryRow: { gap: 8, paddingVertical: 2 },
+  categoryChip: { borderWidth: 1, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
+  draftActions: { flexDirection: 'row', gap: 10, marginTop: 20 },
+  draftButton: { flex: 1, minHeight: 46, borderWidth: 1, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   promptScroll: { maxHeight: 44, marginBottom: 4 },
   promptRow: { flexDirection: 'row', gap: 6, paddingRight: 8 },
   promptChip: { borderWidth: 1, borderRadius: 16, paddingHorizontal: 10, paddingVertical: 6 },

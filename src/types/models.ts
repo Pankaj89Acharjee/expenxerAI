@@ -16,6 +16,57 @@ export interface Expense {
   sourceSettlementId?: string | null;
 }
 
+export interface ExpenseAgentDraft {
+  action: 'create_expense';
+  title: string;
+  merchant: string | null;
+  amount: number | null;
+  currency: 'INR';
+  category: string;
+  dateMillis: number;
+  notes: string;
+  confidence: number;
+  missingFields: Array<'amount' | 'title' | 'date'>;
+}
+
+export interface ReceiptScanFinding {
+  merchant: string | null;
+  totalAmount: number | null;
+  receiptDate: string | null;
+  currency: 'INR';
+  suggestedCategory: string;
+  invoiceNumber: string | null;
+  confidence: number;
+  warnings: string[];
+  lineItems: ReceiptLineItem[];
+  expenseGroups: ReceiptExpenseGroup[];
+}
+
+export interface ReceiptLineItem {
+  name: string;
+  quantity: number | null;
+  amount: number;
+  category: string;
+}
+
+export interface ReceiptExpenseGroup {
+  title: string;
+  amount: number;
+  category: string;
+  itemNames: string[];
+}
+
+export interface ReceiptExpenseDraft {
+  title: string;
+  amount: number | null;
+  category: string;
+  dateMillis: number;
+  notes: string;
+  confidence: number;
+  duplicateExpenseId: string | null;
+  warnings: string[];
+}
+
 export type LiabilityKind = 'ANNUAL' | 'LOAN' | 'CREDIT_CARD_LOAN';
 export type LoanType =
   | 'PERSONAL_LOAN'

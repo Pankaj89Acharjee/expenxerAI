@@ -1,6 +1,10 @@
 import { MaterialIcons } from '@expo/vector-icons';
 import DateTimePicker, { type DateTimePickerChangeEvent } from '@react-native-community/datetimepicker';
 import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as IntentLauncher from 'expo-intent-launcher';
+import * as Sharing from 'expo-sharing';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
@@ -34,7 +38,8 @@ import {
 } from '@/src/utils/expenseDateRange';
 import { isPlannerLinkedExpense } from '@/src/utils/plannerExpenses';
 import { plannerHref } from '@/src/utils/plannerNavigation';
-import type { Expense } from '@/src/types/models';
+import { completeReceiptAgentRun, runReceiptAgentGraph } from '@/src/services/receiptAgent';
+import type { Expense, ReceiptExpenseDraft } from '@/src/types/models';
 
 const CATEGORY_ICONS: Record<string, string> = {
   Food: '🍔', Transport: '🚗', Utilities: '💡', Shopping: '🛍️', Entertainment: '🎬',
@@ -146,9 +151,17 @@ export default function ExpenseScreen() {
   const [expenseDate, setExpenseDate] = useState(startOfDay(Date.now()));
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [receiptUri, setReceiptUri] = useState<string | null>(null);
+  const [receiptMimeType, setReceiptMimeType] = useState('image/jpeg');
+  const [showReceiptPreview, setShowReceiptPreview] = useState(false);
   const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [receiptScanning, setReceiptScanning] = useState(false);
+  const [receiptDraft, setReceiptDraft] = useState<ReceiptExpenseDraft | null>(null);
+  const [receiptDraftQueue, setReceiptDraftQueue] = useState<ReceiptExpenseDraft[]>([]);
+  const [receiptDraftNumber, setReceiptDraftNumber] = useState(0);
+  const [receiptScanError, setReceiptScanError] = useState<string | null>(null);
+  const [receiptRunId, setReceiptRunId] = useState<string | null>(null);
 
   const [settlingExpense, setSettlingExpense] = useState<Expense | null>(null);
   const [settlementNote, setSettlementNote] = useState('');
@@ -202,7 +215,7 @@ export default function ExpenseScreen() {
   );
 
   useEffect(() => {
-    if (!showAdd || !title.trim()) {
+    if (!showAdd || !title.trim() || receiptDraft) {
       setAiSuggestion(null);
       return;
     }
@@ -215,7 +228,7 @@ export default function ExpenseScreen() {
       setAiLoading(false);
     }, 1000);
     return () => clearTimeout(timer);
-  }, [title, amount, showAdd, suggestCategory]);
+  }, [title, amount, showAdd, suggestCategory, receiptDraft]);
 
   const resetForm = () => {
     setTitle('');
@@ -224,8 +237,16 @@ export default function ExpenseScreen() {
     setNotes('');
     setExpenseDate(startOfDay(Date.now()));
     setReceiptUri(null);
+    setReceiptMimeType('image/jpeg');
+    setShowReceiptPreview(false);
     setAiSuggestion(null);
     setShowDatePicker(false);
+    setReceiptScanning(false);
+    setReceiptDraft(null);
+    setReceiptDraftQueue([]);
+    setReceiptDraftNumber(0);
+    setReceiptScanError(null);
+    setReceiptRunId(null);
   };
 
   const openEdit = useCallback(
@@ -289,20 +310,101 @@ export default function ExpenseScreen() {
 
   const periodButtonLabel = timePeriod === 'custom' ? expenseRange.label : activePeriod.shortLabel;
 
-  const handleCaptureReceipt = async () => {
-    const { status } = await ImagePicker.requestCameraPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Allow camera access to capture receipt photos.');
+  const scanSelectedReceipt = async (uri: string, mimeType: string) => {
+    setReceiptUri(uri);
+    setReceiptMimeType(mimeType);
+    setReceiptDraft(null);
+    setReceiptScanError(null);
+    setReceiptScanning(true);
+    try {
+      const result = await runReceiptAgentGraph({ imageUri: uri, mimeType, existingExpenses: expenses });
+      setReceiptRunId(result.runId);
+      if (result.status !== 'awaiting_approval' || !result.drafts.length) {
+        setReceiptScanError(result.error ?? 'The receipt agents could not create a draft.');
+        return;
+      }
+      const [draft, ...remainingDrafts] = result.drafts;
+      setReceiptDraft(draft);
+      setReceiptDraftQueue(remainingDrafts);
+      setReceiptDraftNumber(1);
+      setTitle(draft.title);
+      setAmount(draft.amount?.toString() ?? '');
+      setCategory(draft.category);
+      setExpenseDate(draft.dateMillis);
+      setNotes(draft.notes);
+    } catch (error) {
+      setReceiptScanError(error instanceof Error ? error.message : 'Receipt scan failed.');
+    } finally {
+      setReceiptScanning(false);
+    }
+  };
+
+  const selectReceiptPdf = async () => {
+    const result = await DocumentPicker.getDocumentAsync({
+      type: 'application/pdf',
+      copyToCacheDirectory: true,
+      multiple: false,
+    });
+    if (!result.canceled && result.assets[0]?.uri) {
+      const asset = result.assets[0];
+      await scanSelectedReceipt(asset.uri, asset.mimeType ?? 'application/pdf');
+    }
+  };
+
+  const previewReceipt = async () => {
+    if (!receiptUri) return;
+    if (receiptMimeType.startsWith('image/')) {
+      setShowReceiptPreview(true);
       return;
     }
-    const result = await ImagePicker.launchCameraAsync({
+    try {
+      if (Platform.OS === 'android') {
+        const contentUri = receiptUri.startsWith('file://')
+          ? await FileSystem.getContentUriAsync(receiptUri)
+          : receiptUri;
+        await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+          data: contentUri,
+          type: receiptMimeType,
+          flags: 1,
+        });
+      } else if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(receiptUri, { mimeType: receiptMimeType, UTI: 'com.adobe.pdf' });
+      }
+    } catch {
+      Alert.alert('Preview unavailable', 'No app is available to preview this PDF.');
+    }
+  };
+
+  const selectReceipt = async (source: 'camera' | 'gallery') => {
+    const permission = source === 'camera'
+      ? await ImagePicker.requestCameraPermissionsAsync()
+      : await ImagePicker.requestMediaLibraryPermissionsAsync();
+    const { status } = permission;
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', `Allow ${source} access to select receipt photos.`);
+      return;
+    }
+    const options: ImagePicker.ImagePickerOptions = {
       mediaTypes: ['images'],
       quality: 0.85,
       allowsEditing: true,
-    });
-    if (!result.canceled && result.assets[0]?.uri) {
-      setReceiptUri(result.assets[0].uri);
+    };
+    const result = source === 'camera'
+      ? await ImagePicker.launchCameraAsync(options)
+      : await ImagePicker.launchImageLibraryAsync(options);
+    const asset = result.canceled ? null : result.assets[0];
+    if (asset?.uri) {
+      await scanSelectedReceipt(asset.uri, asset.mimeType ?? 'image/jpeg');
     }
+  };
+
+  const handleReceiptSource = () => {
+    Alert.alert('Add receipt', 'The receipt agents will scan the selected image or PDF.', [
+      { text: 'Camera', onPress: () => void selectReceipt('camera') },
+      { text: 'Gallery', onPress: () => void selectReceipt('gallery') },
+      { text: 'PDF document', onPress: () => void selectReceiptPdf() },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   };
 
   const handleSave = async () => {
@@ -327,12 +429,31 @@ export default function ExpenseScreen() {
       Alert.alert('Save failed', error);
       return;
     }
+    if (!editing && receiptDraftQueue.length > 0) {
+      const [nextDraft, ...remainingDrafts] = receiptDraftQueue;
+      setReceiptDraft(nextDraft);
+      setReceiptDraftQueue(remainingDrafts);
+      setReceiptDraftNumber((value) => value + 1);
+      setTitle(nextDraft.title);
+      setAmount(nextDraft.amount?.toString() ?? '');
+      setCategory(nextDraft.category);
+      setExpenseDate(nextDraft.dateMillis);
+      setNotes(nextDraft.notes);
+      Alert.alert('Expense added', `${receiptDraftQueue.length} detected expense${receiptDraftQueue.length === 1 ? '' : 's'} remaining for review.`);
+      return;
+    }
+    if (receiptRunId) {
+      await completeReceiptAgentRun(receiptRunId, 'approved').catch(() => undefined);
+    }
     setShowAdd(false);
     setEditing(null);
     resetForm();
   };
 
   const closeModal = () => {
+    if (receiptRunId) {
+      void completeReceiptAgentRun(receiptRunId, 'cancelled');
+    }
     setShowAdd(false);
     setEditing(null);
     resetForm();
@@ -771,18 +892,58 @@ export default function ExpenseScreen() {
                 onChangeText={setNotes}
                 multiline
               />
-              <Pressable style={[styles.receiptBtn, inputStyle(colors, isDark)]} onPress={handleCaptureReceipt}>
-                <MaterialIcons name="photo-camera" size={22} color={colors.textMuted} />
+              <Pressable style={[styles.receiptBtn, inputStyle(colors, isDark)]} onPress={handleReceiptSource} disabled={receiptScanning}>
+                {receiptScanning ? <ActivityIndicator size="small" color={colors.primary} /> : <MaterialIcons name="document-scanner" size={22} color={colors.textMuted} />}
                 <Text style={{ color: colors.textMuted, fontSize: 14, fontWeight: '500' }}>
-                  {receiptUri ? 'Retake receipt photo' : 'Capture receipt photo'}
+                  {receiptScanning ? 'Receipt agents are working…' : receiptUri ? 'Replace and rescan receipt' : 'Scan receipt with AI'}
                 </Text>
               </Pressable>
-              {receiptUri ? <Image source={{ uri: receiptUri }} style={styles.receiptPreview} contentFit="cover" /> : null}
+              {receiptUri ? (
+                <Pressable style={styles.receiptPreviewButton} onPress={() => void previewReceipt()}>
+                  {receiptMimeType.startsWith('image/') ? (
+                    <Image source={{ uri: receiptUri }} style={styles.receiptPreview} contentFit="cover" />
+                  ) : (
+                    <View style={[styles.pdfPreview, { backgroundColor: colors.surfaceVariant, borderColor: colors.border }]}>
+                      <MaterialIcons name="picture-as-pdf" size={38} color={colors.error} />
+                      <Text style={{ color: colors.text, fontWeight: '700' }}>Receipt PDF</Text>
+                    </View>
+                  )}
+                  <View style={styles.previewBadge}>
+                    <MaterialIcons name="visibility" size={15} color="#fff" />
+                    <Text style={styles.previewBadgeText}>Tap to preview</Text>
+                  </View>
+                </Pressable>
+              ) : null}
+              {receiptDraft ? (
+                <View style={[styles.receiptAgentResult, { backgroundColor: colors.emeraldSoft, borderColor: colors.border }]}>
+                  <Text style={{ color: colors.emeraldText, fontWeight: '800', fontSize: 13 }}>
+                    AI draft ready · {Math.round(receiptDraft.confidence * 100)}% confidence
+                  </Text>
+                  <Text style={{ color: colors.textMuted, fontSize: 12, lineHeight: 17, marginTop: 4 }}>
+                    Expense {receiptDraftNumber} of {receiptDraftNumber + receiptDraftQueue.length}. Review and Save it to load the next detected category.
+                  </Text>
+                  {[receiptDraft, ...receiptDraftQueue].map((draft, index) => (
+                    <View key={`${draft.category}-${draft.title}-${index}`} style={[styles.detectedExpenseRow, { borderColor: colors.border }]}>
+                      <MaterialIcons name={index === 0 ? 'edit' : 'schedule'} size={17} color={index === 0 ? colors.primary : colors.textMuted} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: colors.text, fontWeight: '700', fontSize: 12 }} numberOfLines={2}>{draft.title}</Text>
+                        <Text style={{ color: colors.textMuted, fontSize: 11 }}>{draft.category} · {formatCurrency(draft.amount ?? 0)}</Text>
+                      </View>
+                    </View>
+                  ))}
+                  {receiptDraft.warnings.map((warning) => (
+                    <Text key={warning} style={{ color: colors.error, fontSize: 12, marginTop: 4 }}>• {warning}</Text>
+                  ))}
+                </View>
+              ) : null}
+              {receiptScanError ? (
+                <Text style={{ color: colors.error, fontSize: 12 }}>{receiptScanError} Enter the details manually or rescan.</Text>
+              ) : null}
               <View style={styles.modalActions}>
                 <Pressable style={styles.cancelBtn} onPress={closeModal} disabled={saving}>
                   <Text style={{ color: colors.primary, fontWeight: '700', fontSize: 15 }}>Cancel</Text>
                 </Pressable>
-                <Pressable style={[styles.saveBtn, { backgroundColor: colors.primary }]} onPress={handleSave} disabled={saving}>
+                <Pressable style={[styles.saveBtn, { backgroundColor: colors.primary }]} onPress={handleSave} disabled={saving || receiptScanning}>
                   {saving ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.saveBtnText}>Save</Text>}
                 </Pressable>
               </View>
@@ -791,6 +952,17 @@ export default function ExpenseScreen() {
         </View>
         </KeyboardModalShell>
         ) : null}
+      </Modal>
+
+      <Modal visible={showReceiptPreview} transparent animationType="fade" onRequestClose={() => setShowReceiptPreview(false)}>
+        <View style={styles.fullPreviewOverlay}>
+          <Pressable style={styles.fullPreviewClose} onPress={() => setShowReceiptPreview(false)} hitSlop={12}>
+            <MaterialIcons name="close" size={28} color="#fff" />
+          </Pressable>
+          {receiptUri && receiptMimeType.startsWith('image/') ? (
+            <Image source={{ uri: receiptUri }} style={styles.fullPreviewImage} contentFit="contain" />
+          ) : null}
+        </View>
       </Modal>
 
       {/* Settlement modal */}
@@ -1014,6 +1186,15 @@ const styles = StyleSheet.create({
   notesInput: { minHeight: 72, textAlignVertical: 'top' },
   receiptBtn: { flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 1, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 14 },
   receiptPreview: { width: '100%', height: 120, borderRadius: 12 },
+  receiptPreviewButton: { position: 'relative' },
+  pdfPreview: { height: 120, borderRadius: 12, borderWidth: 1, alignItems: 'center', justifyContent: 'center', gap: 6 },
+  previewBadge: { position: 'absolute', right: 8, bottom: 8, borderRadius: 999, paddingHorizontal: 9, paddingVertical: 5, backgroundColor: 'rgba(0,0,0,0.72)', flexDirection: 'row', alignItems: 'center', gap: 5 },
+  previewBadgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  receiptAgentResult: { borderWidth: 1, borderRadius: 12, padding: 12 },
+  detectedExpenseRow: { flexDirection: 'row', alignItems: 'center', gap: 8, borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 8, marginTop: 8 },
+  fullPreviewOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.96)', justifyContent: 'center', alignItems: 'center' },
+  fullPreviewClose: { position: 'absolute', top: 48, right: 20, zIndex: 2, padding: 8 },
+  fullPreviewImage: { width: '100%', height: '100%' },
   modalActions: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 16, marginTop: 4 },
   cancelBtn: { paddingVertical: 10, paddingHorizontal: 4 },
   saveBtn: { paddingHorizontal: 28, paddingVertical: 12, borderRadius: 999, minWidth: 96, alignItems: 'center' },

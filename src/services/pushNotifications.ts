@@ -132,6 +132,47 @@ export async function sendPushToUsers(
   await Promise.all(unique.map((uid) => sendPushToUser(uid, title, body, data)));
 }
 
+/** Present immediate feedback on this device after a confirmed action succeeds. */
+export async function presentExpenseLoggedNotification(
+  title: string,
+  amount: number,
+  category: string
+): Promise<void> {
+  const Notifications = await getNotifications();
+  if (!Notifications) return;
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title: 'Expense logged',
+      body: `₹${amount.toLocaleString('en-IN')} at ${title} was added to ${category}.`,
+      data: { tab: 'expenses' satisfies PushTabTarget },
+    },
+    trigger: null,
+  });
+}
+
+export async function scheduleLocalReminderNotification(
+  identifier: string,
+  title: string,
+  body: string,
+  triggerMillis: number | null,
+  data: { tab?: PushTabTarget; groupId?: string } = {}
+): Promise<void> {
+  if (Platform.OS === 'web') return;
+  const Notifications = await getNotifications();
+  if (!Notifications) return;
+  await Notifications.cancelScheduledNotificationAsync(identifier);
+  await Notifications.scheduleNotificationAsync({
+    identifier,
+    content: { title, body, data, sound: 'default' },
+    trigger: triggerMillis == null
+      ? null
+      : {
+          type: Notifications.SchedulableTriggerInputTypes.DATE,
+          date: new Date(triggerMillis),
+        },
+  });
+}
+
 export function tabFromNotificationType(type: string): PushTabTarget {
   const t = type.toUpperCase();
   if (t.includes('SPLIT')) return 'split';

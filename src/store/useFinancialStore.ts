@@ -57,6 +57,10 @@ import { searchRegisteredUsers } from '@/src/services/userDirectoryCloud';
 import { consumePendingInviteCode } from '@/src/utils/inviteLink';
 import { shareSplitInvite } from '@/src/utils/whatsappInvite';
 import { buildAdvisorSystemPrompt } from '@/src/utils/advisorContext';
+import {
+  runBillReminderAgentGraph,
+  type BillReminderInsight,
+} from '@/src/services/billReminderAgent';
 import { calculateMonthlyEmi } from '@/src/utils/emiCalculator';
 import { buildSchedule, buildLoanEmiSchedule, completeLiabilityPayment, isLoanLiability, mergeLiabilitySchedule, parseInstallments, serializeInstallments, settleInstallmentOnLiability, shouldRecordPayment, syncAllLiabilityPaymentStatuses } from '@/src/utils/liabilitySchedule';
 import { billExpenseCategory } from '@/src/constants/billPurposes';
@@ -307,6 +311,7 @@ function clearUserState() {
     groupSettlements: [] as GroupSettlement[],
     allGroupSettlements: [] as GroupSettlement[],
     logs: [] as NotificationLog[],
+    billReminderInsights: [] as BillReminderInsight[],
     budgetTemplates: [] as BudgetTemplate[],
     categoryBudgets: [] as CategoryBudget[],
     selectedGroupId: null as string | null,
@@ -341,6 +346,7 @@ interface FinancialState {
   groupExpenses: GroupExpense[];
   groupSettlements: GroupSettlement[];
   logs: NotificationLog[];
+  billReminderInsights: BillReminderInsight[];
   budgetTemplates: BudgetTemplate[];
   categoryBudgets: CategoryBudget[];
   selectedGroupId: string | null;
@@ -506,6 +512,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   groupExpenses: [],
   groupSettlements: [],
   logs: [],
+  billReminderInsights: [],
   budgetTemplates: [],
   categoryBudgets: [],
   selectedGroupId: null,
@@ -629,6 +636,29 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
       categoryBudgets,
       allGroupExpenses,
     });
+    if (profile?.alertPreference !== false) {
+      void runBillReminderAgentGraph({
+        uid,
+        profile,
+        expenses: expensesRaw,
+        bills,
+        liabilities,
+      }).then(async ({ insights, newlyNotified }) => {
+        if (currentUid() === uid) set({ billReminderInsights: insights });
+        for (const insight of newlyNotified) {
+          await addCloudLog(
+            uid,
+            email,
+            insight.status === 'overdue' ? 'Payment Overdue' : 'Payment Reminder',
+            insight.message,
+            insight.kind === 'emi' ? 'EMI_REMINDER' : 'BILL_REMINDER',
+            false
+          );
+        }
+      }).catch(() => undefined);
+    } else {
+      set({ billReminderInsights: [] });
+    }
     await get().refreshGroupExpenses();
     startSplitRealtime(uid, set, get);
     void get().refreshChat();

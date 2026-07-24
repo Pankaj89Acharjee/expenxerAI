@@ -437,7 +437,8 @@ export async function addCloudLog(
   userEmail: string,
   title: string,
   message: string,
-  type: string
+  type: string,
+  sendPush = true
 ): Promise<void> {
   await saveItem(uid, 'notification_logs', {
     userEmail,
@@ -446,6 +447,7 @@ export async function addCloudLog(
     timestamp: Date.now(),
     type,
   });
+  if (!sendPush) return;
   try {
     const { sendPushToUser, tabFromNotificationType } = await import(
       '@/src/services/pushNotifications'
