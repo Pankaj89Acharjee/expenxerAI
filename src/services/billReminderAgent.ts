@@ -7,7 +7,7 @@ import { getRecurringPaymentStatus, startOfDay } from '@/src/utils/recurringBill
 import { scheduleLocalReminderNotification } from '@/src/services/pushNotifications';
 import { planBillReminderActions } from '@/src/services/gemini';
 
-const DAY_MS = 86_400_000;
+const DAY_MS = 86_400_000; // 24 * 60 * 60 * 1000
 export const REMINDER_LEAD_DAYS = 2;
 
 export type BillReminderInsight = {
