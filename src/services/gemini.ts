@@ -4,7 +4,7 @@ import type { ChatAttachment, ChatMessage } from '@/src/types/models';
 import type { ExpenseAgentDraft, ReceiptScanFinding } from '@/src/types/models';
 import { FORM_CATEGORIES } from '@/src/constants/categories';
 
-const GEMINI_MODELS = ['gemini-3.6-flash'];
+const GEMINI_MODELS = ['gemini-3.8-flash'];
 const MAX_HISTORY_TURNS = 20;
 
 function getApiKey(): string {
