@@ -157,16 +157,23 @@ export async function scheduleBillReminderAgent(
     reminderAt.setHours(9, 0, 0, 0);
     const triggerMillis = reminderAt.getTime() > now ? reminderAt.getTime() : null;
 
-    if (triggerMillis != null || seen[insight.key] !== todayKey) {
-      await scheduleLocalReminderNotification(
+    if (triggerMillis == null && seen[insight.key] === todayKey) continue;
+
+    let delivered = false;
+    try {
+      delivered = await scheduleLocalReminderNotification(
         identifier,
         insight.status === 'overdue' ? 'Payment overdue' : 'Payment reminder',
         insight.message,
         triggerMillis,
         { tab: 'planner' }
       );
+    } catch {
+      delivered = false;
     }
-    if (triggerMillis == null && seen[insight.key] !== todayKey) {
+    // Only mark as seen once Android actually accepted it — otherwise a
+    // denied/pending permission would suppress today's alert for good.
+    if (delivered && triggerMillis == null) {
       seen[insight.key] = todayKey;
       newlyNotified.push(insight);
     }

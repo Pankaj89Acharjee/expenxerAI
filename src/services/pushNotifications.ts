@@ -43,6 +43,49 @@ function projectId(): string | undefined {
   );
 }
 
+/** High-importance channel so reminders show as heads-up alerts, not silently in the tray. */
+const REMINDER_CHANNEL_ID = 'payment-reminders';
+
+let permissionRequest: Promise<boolean> | null = null;
+
+/**
+ * Ask for notification permission once and share the in-flight prompt, so the
+ * reminder agent waits for the user's answer instead of posting while the
+ * dialog is still open (Android drops those notifications silently).
+ */
+async function ensureNotificationPermission(Notifications: NotificationsModule): Promise<boolean> {
+  if (!permissionRequest) {
+    permissionRequest = (async () => {
+      const { status: existing } = await Notifications.getPermissionsAsync();
+      if (existing === 'granted') return true;
+      const { status } = await Notifications.requestPermissionsAsync();
+      return status === 'granted';
+    })();
+    // Re-check on the next call when denied, in case it was enabled from Settings.
+    void permissionRequest.then((granted) => {
+      if (!granted) permissionRequest = null;
+    }, () => {
+      permissionRequest = null;
+    });
+  }
+  return permissionRequest;
+}
+
+async function ensureAndroidChannels(Notifications: NotificationsModule): Promise<void> {
+  if (Platform.OS !== 'android') return;
+  await Notifications.setNotificationChannelAsync('default', {
+    name: 'Expenxer',
+    importance: Notifications.AndroidImportance.DEFAULT,
+  });
+  await Notifications.setNotificationChannelAsync(REMINDER_CHANNEL_ID, {
+    name: 'Payment reminders',
+    description: 'Bill, EMI and liability due-date reminders',
+    importance: Notifications.AndroidImportance.HIGH,
+    sound: 'default',
+    vibrationPattern: [0, 250, 250, 250],
+  });
+}
+
 /** Request permission and return an Expo push token (or null). */
 export async function registerForPushNotificationsAsync(): Promise<string | null> {
   if (Platform.OS === 'web') return null;
@@ -51,20 +94,8 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
   const Notifications = await getNotifications();
   if (!Notifications) return null;
 
-  const { status: existing } = await Notifications.getPermissionsAsync();
-  let finalStatus = existing;
-  if (existing !== 'granted') {
-    const { status } = await Notifications.requestPermissionsAsync();
-    finalStatus = status;
-  }
-  if (finalStatus !== 'granted') return null;
-
-  if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync('default', {
-      name: 'Expenxer',
-      importance: Notifications.AndroidImportance.DEFAULT,
-    });
-  }
+  if (!(await ensureNotificationPermission(Notifications))) return null;
+  await ensureAndroidChannels(Notifications);
 
   const pid = projectId();
   const token = await Notifications.getExpoPushTokenAsync(
@@ -150,27 +181,38 @@ export async function presentExpenseLoggedNotification(
   });
 }
 
+/** Returns true only when the reminder was actually posted or scheduled. */
 export async function scheduleLocalReminderNotification(
   identifier: string,
   title: string,
   body: string,
   triggerMillis: number | null,
   data: { tab?: PushTabTarget; groupId?: string } = {}
-): Promise<void> {
-  if (Platform.OS === 'web') return;
+): Promise<boolean> {
+  if (Platform.OS === 'web') return false;
   const Notifications = await getNotifications();
-  if (!Notifications) return;
+  if (!Notifications) return false;
+  if (!(await ensureNotificationPermission(Notifications))) return false;
+  await ensureAndroidChannels(Notifications);
   await Notifications.cancelScheduledNotificationAsync(identifier);
   await Notifications.scheduleNotificationAsync({
     identifier,
-    content: { title, body, data, sound: 'default' },
+    content: {
+      title,
+      body,
+      data,
+      sound: 'default',
+      priority: Notifications.AndroidNotificationPriority.HIGH,
+    },
     trigger: triggerMillis == null
-      ? null
+      ? { channelId: REMINDER_CHANNEL_ID }
       : {
           type: Notifications.SchedulableTriggerInputTypes.DATE,
           date: new Date(triggerMillis),
+          channelId: REMINDER_CHANNEL_ID,
         },
   });
+  return true;
 }
 
 export function tabFromNotificationType(type: string): PushTabTarget {

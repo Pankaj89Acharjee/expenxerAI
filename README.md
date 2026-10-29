@@ -226,9 +226,12 @@ Then commit and push the code to GitHub and run the EAS build again:
 ```bash
 eas build --platform android --profile production
 ```
+---
 
-### Local Android APK Build Guide (Without Android Studio)
 
+
+# **Local Android APK Build Guide (Without Android Studio)**
+---
 This guide documents the exact process used to successfully build an Android APK locally on Windows 10 for an **Expo SDK 56** project **without** installing the heavy Android Studio IDE.
 
 ---
@@ -310,7 +313,7 @@ java -version
 
 ## 💻 Step 4: Run the Local Expo Compile Process
 
-1. Open your project folder directly inside **Cursor** with **Command Prompt (cmd)** in the terminal.
+1. Open your project folder directly inside **Cursor** or any **IDE** with **Command Prompt (cmd)** in the terminal.
 2. Run the following deployment script:
 
 ```cmd
@@ -324,14 +327,6 @@ cd android
 gradlew assembleRelease
 ```
 
-### **Issues when adjusting Gemini Model and Some issues fix after several months**
-
-After two months I found that now Expo SDK has been updraged to SDK 58, but mine is SDK 56 (in Mobile App Expo Go), so I faced issue while testing on phone. I again downgraded the mobile App Expo Go from `https://expo.dev/go` website to download SDK 56, again reinstalling it resolved the issue. 
-
-Also I have updated 17 libraries which were outdated to run SDK 56. 
-For updating package - `npx expo install --fix`
-For checking any out dated package - `npx expo install --check`
-
 ---
 
 ## 📦 Where to Find Your Completed APK
@@ -342,7 +337,15 @@ Once the terminal screen prints a green `BUILD SUCCESSFUL` announcement, your st
 
 Right-click the `app-release.apk` file inside Cursor and select **Reveal in File Explorer** to transfer it to a physical device for runtime testing!
 
+---
 
+### **Issues when adjusting Gemini Model and Some issues fix after several months**
+
+After two months I found that now Expo SDK has been updraged to SDK 58, but mine is SDK 56 (in Mobile App Expo Go), so I faced issue while testing on phone. I again downgraded the mobile App Expo Go from `https://expo.dev/go` website to download SDK 56, again reinstalling it resolved the issue. 
+
+Also I have updated 17 libraries which were outdated to run SDK 56. 
+For updating package - `npx expo install --fix`
+For checking any out dated package - `npx expo install --check`
 
 
 
