@@ -9,7 +9,7 @@ Cross-platform expense and wealth app — Expo/React Native port of the original
 - **Expenses** — Search, category filters, budget trackers, AI auto-categorization (Gemini), receipt scan simulation
 - **Planner** — Annual liabilities, subscriptions, budget templates with apply-to-month
 - **Split** — Group expense splitting with equal-split settlement engine
-- **AI Advisor** — Gemini-powered financial coach chat with full context injection
+- **AI Advisor** — Gemini-powered financial coach chat with full context injection. 
 - **Profile** — Gallery photo upload (Firebase Storage), income/savings rate, alerts, cloud sync (Firestore)
 - **Export** — CSV share, PDF print, Google Sheets sync (sandbox + real API), Gmail reports
 
@@ -32,7 +32,6 @@ cd futurefund-expo
 npm install
 cp .env.example .env
 # Fill in EXPO_PUBLIC_GEMINI_API_KEY and Firebase keys (see below)
-npm expo start
 
 npx expo start
 
@@ -161,7 +160,8 @@ On login, the app pulls the cloud profile into local SQLite. On save/upload, it 
 
 ## Environment
 
-- `EXPO_PUBLIC_GEMINI_API_KEY` — AI chat coach and expense auto-categorization
+- `EXPO_PUBLIC_GEMINI_API_KEY` — AI chat coach and expense auto-categorization. The API key is generated from `Google AI Studio`.
+
 - `EXPO_PUBLIC_FIREBASE_*` — Firebase web config (required for login)
 
 Google Sheets/Gmail sync works in **sandbox mode** without a token (simulated). Provide a real OAuth bearer token in Dashboard → Gmail & Sync Settings for live API calls.
@@ -323,6 +323,14 @@ cd android
 :: 3. Run the local Gradle assembler wrapper to build the standalone binary
 gradlew assembleRelease
 ```
+
+### **Issues when adjusting Gemini Model and Some issues fix after several months**
+
+After two months I found that now Expo SDK has been updraged to SDK 58, but mine is SDK 56 (in Mobile App Expo Go), so I faced issue while testing on phone. I again downgraded the mobile App Expo Go from `https://expo.dev/go` website to download SDK 56, again reinstalling it resolved the issue. 
+
+Also I have updated 17 libraries which were outdated to run SDK 56. 
+For updating package - `npx expo install --fix`
+For checking any out dated package - `npx expo install --check`
 
 ---
 
